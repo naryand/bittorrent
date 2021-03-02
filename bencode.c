@@ -3,6 +3,8 @@
 
 typedef enum type {INT, STRING, PAIR, LIST, DICT} type;
 
+// byte string, not "string"
+// no null terminator
 typedef struct {
     char *str;
     int len;
@@ -11,7 +13,7 @@ typedef struct {
 typedef struct Node {
     void *data;
     struct Node *next;
-    type type;
+    type t;
 } Node;
 
 typedef struct {
@@ -19,11 +21,11 @@ typedef struct {
     Node *tail;
 } List;
 
-void append(List *list, void *data, char type) {
-    Node *node = malloc(sizeof(Node));
+void append(List *list, void *data, type t) {
+    Node *node = calloc(1, sizeof(Node));
     node->data = data;
     node->next = NULL;
-    node->type = type;
+    node->t = t;
     if(list->head == NULL) {
         list->head = node;
         list->tail = node;
@@ -36,11 +38,11 @@ void append(List *list, void *data, char type) {
 typedef struct {
     String *key;
     void *val;
-    char type;
+    type t;
 } Pair;
 
 static int *parse_int(char *str) {
-    int *num = malloc(sizeof(int));
+    int *num = calloc(1, sizeof(int));
     sscanf(str, "i%de", num);
     return num;
 }
@@ -54,13 +56,13 @@ static int get_int_len(char *str) {
 static String *parse_str(char *str) {
     int len;
     sscanf(str, "%d:", &len);
-    char *ret = malloc(len);
+    char *ret = calloc(len, 1);
     // advance past len:
     for(; *str != ':'; str++) {} str++;
     // read len bytes
     for(int i = 0; i < len; i++) ret[i] = str[i];
     // store byte string
-    String *s = malloc(sizeof(String));
+    String *s = calloc(1, sizeof(String));
     s->str = ret;
     s->len = len;
     return s;
@@ -91,7 +93,7 @@ static int get_list_len(char *str) {
 static List *parse_dict(char *str);
 
 static List *parse_list(char *str) {
-    List *list = malloc(sizeof(List)); str++;
+    List *list = calloc(1, sizeof(List)); str++;
     while(*str != 'e') {
         if(*str == 'i') {
             append(list, parse_int(str), INT);
@@ -115,22 +117,22 @@ static List *parse_list(char *str) {
 }
 
 static Pair *parse_pair(char *str) {
-    Pair *pair = malloc(sizeof(Pair));
+    Pair *pair = calloc(1, sizeof(Pair));
     pair->key = parse_str(str);
     // advance past str
     str += get_str_len(str);
     if(*str == 'i') {
         pair->val = parse_int(str);
-        pair->type = INT;
+        pair->t = INT;
     } else if(*str == 'l') {
         pair->val = parse_list(str);
-        pair->type = LIST;
+        pair->t = LIST;
     } else if(*str == 'd') {
         pair->val = parse_dict(str);
-        pair->type = DICT;
+        pair->t = DICT;
     } else {
         pair->val = parse_str(str);
-        pair->type = STRING;
+        pair->t = STRING;
     }
     return pair;
 }
@@ -146,7 +148,7 @@ static int get_pair_len(char *str) {
 }
 
 static List *parse_dict(char *str) {
-    List *dict = malloc(sizeof(List)); str++;
+    List *dict = calloc(1, sizeof(List)); str++;
     while(*str != 'e') {
         append(dict, parse_pair(str), PAIR);
         str += get_pair_len(str);
@@ -161,7 +163,7 @@ static int get_dict_len(char *str) {
 }
 
 List *parse(char *str) {
-    List *tree = malloc(sizeof(List));
+    List *tree = calloc(1, sizeof(List));
     while(*str != 0 && *str != 'e') {
         if(*str == 'i') {
             append(tree, parse_int(str), INT);
@@ -195,21 +197,21 @@ static void print_dict(List *dict) {
     for(Node *cur = dict->head; cur != NULL; cur = cur->next) {
         Pair *pair = cur->data;
         String *key = pair->key;
-        if(pair->type == INT) {
+        if(pair->t == INT) {
             int *num = pair->val;
             print_str(key);
             printf(":%d, ", *num);
-        } else if(pair->type == LIST) {
+        } else if(pair->t == LIST) {
             print_str(key);
             printf(":");
             print_list(pair->val);
             printf(", ");
-        } else if(pair->type == DICT) {
+        } else if(pair->t == DICT) {
             print_str(key);
             printf(":");
             print_dict(pair->val);
             printf(", ");
-        } else if(pair->type == STRING) {
+        } else if(pair->t == STRING) {
             String *val = pair->val;
             print_str(key);
             printf(":");
@@ -223,16 +225,16 @@ static void print_dict(List *dict) {
 static void print_list(List *list) {
     printf("[");
     for(Node *cur = list->head; cur != NULL; cur = cur->next) {
-        if(cur->type == INT) {
+        if(cur->t == INT) {
             int *num = cur->data;
             printf("%d, ", *num);
-        } else if(cur->type == LIST) {
+        } else if(cur->t == LIST) {
             print_list(cur->data);
             printf(", ");
-        } else if(cur->type == DICT) {
+        } else if(cur->t == DICT) {
             print_dict(cur->data);
             printf(", ");
-        } else if(cur->type == STRING) {
+        } else if(cur->t == STRING) {
             print_str(cur->data);
             printf(", ");
         }
@@ -242,47 +244,61 @@ static void print_list(List *list) {
 
 void print_tree(List *tree) {
     for(Node *cur = tree->head; cur != NULL; cur = cur->next) {
-        if(cur->type == INT) {
+        if(cur->t == INT) {
             int *num = cur->data;
             printf("%d\n", *num);
-        } else if(cur->type == LIST) {
+        } else if(cur->t == LIST) {
             print_list(cur->data);
             printf("\n");
-        } else if(cur->type == DICT) {
+        } else if(cur->t == DICT) {
             print_dict(cur->data);
             printf("\n");
-        } else if(cur->type == STRING) {
-            String *val = cur->data;
-            char *str = val->str;
-            for(int i = 0; i < val->len; i++) printf("%c", str[i]);
+        } else if(cur->t == STRING) {
+            print_str(cur->data);
             printf("\n");
         }
     }
 }
 
-void free_ll(List *tree) {
-    for(Node *cur = tree->head; cur != NULL; cur = cur->next) {
-        if(cur->type == LIST || cur->type == DICT) {
-            free_ll(cur->data);
-        } else if(cur->type == PAIR) {
-            Pair *pair = cur->data;
-            free(pair->key);
-            free(pair->val);
-            free(pair);
-        } else if(cur->type == STRING) {
-            String *str = cur->data;
-            free(str->str);
-            free(str);
-        } else { 
-            free(cur->data);
-        }
+void free_ll(List *tree);
+
+void free_str(String *str) {
+    free(str->str);
+    free(str);
+}
+
+void free_pair(Pair *pair) {
+    String *key = pair->key;
+    free(key->str);
+    free(key);
+    if(pair->t == LIST || pair->t == DICT) {
+        free_ll(pair->val);
+    } else if(pair->t == PAIR) {
+        free_pair(pair->val);
+    } else if(pair->t == STRING) {
+        free_str(pair->val);
+    } else {
+        free(pair->val);
     }
+    free(pair);
+}
+
+void free_ll(List *tree) {
     Node *f = tree->head;
     Node *g;
     while(f != NULL) {
         g = f;
         f = f->next;
+        if(g->t == LIST || g->t == DICT) {
+            free_ll(g->data);
+        } else if(g->t == PAIR) {
+            free_pair(g->data);
+        } else if(g->t == STRING) {
+            free_str(g->data);
+        } else { 
+            free(g->data);
+        }
         free(g);
-    } 
+    }
     free(tree);
 }

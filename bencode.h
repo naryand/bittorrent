@@ -22,6 +22,7 @@ typedef struct {
 void append(List *list, void *data);
 
 List *parse(char *str);
+
 void print_tree(List *tree);
 
 void free_ll(List *tree);

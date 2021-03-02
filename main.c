@@ -1,32 +1,29 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "bencode.h"
-#define MAX_SOURCE_SIZE 65536
+#define MAX_SIZE 65536
 
 int main(void) {
     int fp;
     char fileName[] = "./a.torrent";
-    char *source_str;
+    char *str;
 
     fp = open(fileName, O_RDONLY);
     if(!fp) {
         printf("Failed to load\n");
         exit(1);
     }
-    source_str = (char *) malloc(MAX_SOURCE_SIZE);
-    read(fp, source_str, MAX_SOURCE_SIZE);
-    // source_str = mmap(NULL, MAX_SOURCE_SIZE, PROT_READ, MAP_SHARED, fp, 0);
+    str = (char *) calloc(MAX_SIZE, 1);
+    read(fp, str, MAX_SIZE);
     close(fp);
 
-    List *tree = parse(source_str);;
+    List *tree = parse(str);;
 
     print_tree(tree);
     free_ll(tree);
-    free(source_str);
+    free(str);
 }
