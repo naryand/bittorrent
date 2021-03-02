@@ -28,6 +28,5 @@ int main(void) {
 
     print_tree(tree);
     free_ll(tree);
-    // munmap(source_str, MAX_SOURCE_SIZE);
     free(source_str);
 }
