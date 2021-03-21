@@ -10,4 +10,4 @@ edition = "2018"
 
 [[bin]]
 name = "bittorrent"
-path = "main.rs"
+path = "./src/main.rs"
