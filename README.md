@@ -1,3 +1,3 @@
 # bittorrent
 
-bittorent client from scratch in c
+bittorent client from scratch in rust
