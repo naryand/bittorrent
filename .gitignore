@@ -1,2 +1,6 @@
 main
 a.torrent
+
+# Added by cargo
+
+/target
