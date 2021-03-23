@@ -8,6 +8,42 @@ pub enum Item {
     Dict(BTreeMap<String, Item>),
 }
 
+
+impl Item {
+    #[allow(dead_code)]
+    pub fn get_int(&self) -> &i32 {
+        let int = match &self {
+            Item::Int(int) => int,
+            _ => unreachable!(),
+        };
+        return int;
+    }
+    #[allow(dead_code)]
+    pub fn get_str(&self) -> String {
+        let str = match &self {
+            Item::String(str) => str,
+            _ => unreachable!(),
+        };
+        return str.to_string();
+    }
+    #[allow(dead_code)]
+    pub fn get_list(&self) -> &Vec<Item> {
+        let list = match &self {
+            Item::List(list) => list,
+            _ => unreachable!(),
+        };
+        return list;
+    }
+    #[allow(dead_code)]
+    pub fn get_dict(&self) -> &BTreeMap<String, Item> {
+        let dict = match &self {
+            Item::Dict(dict) => dict,
+            _ => unreachable!(),
+        };
+        return dict;
+    }
+}
+
 fn parse_int(str: &mut Vec<char>) -> i32 {
     let mut len: usize = 0;
     let mut int_string: String = String::new();

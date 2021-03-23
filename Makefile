@@ -1,2 +1,0 @@
-all:
-	rustc main.rs
