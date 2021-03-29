@@ -7,7 +7,11 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+bincode = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+rand = "0.8.3"
+sha-1 = "0.9.4"
 
 [[bin]]
 name = "bittorrent"
-path = "./src/main.rs"
+path = "src/main.rs"

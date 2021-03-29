@@ -1,6 +1,8 @@
 main
 a.torrent
 
-# Added by cargo
-
-/target
+Cargo.lock
+target/
+*.c
+*.h
+*.py
