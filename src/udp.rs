@@ -8,53 +8,53 @@ use rand::random;
 use sha1::{Sha1, Digest};
 use serde::{Serialize, Deserialize};
 
-const MAGIC: i64 = 0x41727101980;
+const MAGIC: u64 = 0x41727101980;
 const PEERS: usize = 32;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ConnectReq {
-    protocol_id: i64,
-    action: i32,
-    transaction_id: i32,
+    protocol_id: u64,
+    action: u32,
+    transaction_id: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ConnectResp {
-    action: i32,
-    transaction_id: i32,
-    connection_id: i64,
+    action: u32,
+    transaction_id: u32,
+    connection_id: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AnnounceReq {
-    connection_id: i64,
-    action: i32,
-    transaction_id: i32,
+    connection_id: u64,
+    action: u32,
+    transaction_id: u32,
     info_hash: [u8; 20],
-    peer_id: [i8; 20],
-    downloaded: i64,
-    left: i64,
-    uploaded: i64,
-    event: i32,
+    peer_id: [u8; 20],
+    downloaded: u64,
+    left: u64,
+    uploaded: u64,
+    event: u32,
     ip_address: u32,
     key: u32,
-    num_want: i32,
+    num_want: u32,
     port: u16,
 }
 
 #[derive(Serialize, Deserialize, Copy, Clone)]
 pub struct IpPort {
-    ip: i32,
+    ip: u32,
     port: u16,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AnnounceResp {
-    action: i32,
-    transaction_id: i32,
-    interval: i32,
-    leechers: i32,
-    seeders: i32,
+    action: u32,
+    transaction_id: u32,
+    interval: u32,
+    leechers: u32,
+    seeders: u32,
 }
 #[derive(Serialize, Deserialize, Debug)]
 struct AnnounceRespExt {
@@ -64,13 +64,13 @@ struct AnnounceRespExt {
 
 impl AnnounceRespExt {
     fn from_be(&mut self) -> &mut AnnounceRespExt {
-        self.resp.action = i32::from_be(self.resp.action);
-        self.resp.transaction_id = i32::from_be(self.resp.transaction_id);
-        self.resp.interval = i32::from_be(self.resp.interval);
-        self.resp.leechers = i32::from_be(self.resp.leechers);
-        self.resp.seeders = i32::from_be(self.resp.seeders);
+        self.resp.action = u32::from_be(self.resp.action);
+        self.resp.transaction_id = u32::from_be(self.resp.transaction_id);
+        self.resp.interval = u32::from_be(self.resp.interval);
+        self.resp.leechers = u32::from_be(self.resp.leechers);
+        self.resp.seeders = u32::from_be(self.resp.seeders);
         for i in 0..PEERS {
-            self.ip_port[i].ip = i32::from_be(self.ip_port[i].ip);
+            self.ip_port[i].ip = u32::from_be(self.ip_port[i].ip);
             self.ip_port[i].port = u16::from_be(self.ip_port[i].port);
         }
         return self
@@ -127,7 +127,7 @@ pub fn udp_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Vec<IpPort
 
     // init structs and serialize
     let req = ConnectReq { 
-        protocol_id: i64::to_be(MAGIC), action: 0, transaction_id: random::<i32>() 
+        protocol_id: u64::to_be(MAGIC), action: 0, transaction_id: random::<u32>() 
     };
     let mut resp = ConnectResp { action: 0, transaction_id: 0, connection_id: 0 }; 
     let mut req_u8: Vec<u8> = bincode::serialize(&req).unwrap();
@@ -139,16 +139,14 @@ pub fn udp_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Vec<IpPort
 
     // deserialize struct and check tx id
     resp = bincode::deserialize(&resp_u8).unwrap();
-    if resp.transaction_id != req.transaction_id {
-        panic!("tx id mismatch");
-    }
 
     // init structs and serialize
     let announce_req = AnnounceReq { 
-        connection_id: resp.connection_id, action: i32::to_be(1), 
-        transaction_id: random::<i32>(), info_hash: info_hash, 
+        connection_id: resp.connection_id, action: u32::to_be(1), 
+        transaction_id: random::<u32>(), info_hash: info_hash, 
         peer_id: [1; 20], downloaded: 0, left: 0, uploaded: 0,
-        event: 0, ip_address: 0, key: 0, num_want: PEERS as i32, port: 0
+        event: 0, ip_address: u32::to_be(1179085955), key: 0, 
+        num_want: u32::to_be(PEERS as u32), port: u16::to_be(25565),
     };                                    
     let mut announce_resp = AnnounceRespExt { 
         resp: AnnounceResp { 

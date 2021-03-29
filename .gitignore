@@ -3,3 +3,6 @@ a.torrent
 
 Cargo.lock
 target/
+*.c
+*.h
+*.py
