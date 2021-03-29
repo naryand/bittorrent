@@ -3,28 +3,28 @@ use std::collections::BTreeMap;
 #[derive(Debug)]
 pub enum Item {
     Int(i32),
-    String(String),
+    String(Vec<u8>),
     List(Vec<Item>),
-    Dict(BTreeMap<String, Item>),
+    Dict(BTreeMap<Vec<u8>, Item>),
 }
 
 
 impl Item {
     #[allow(dead_code)]
-    pub fn get_int(&self) -> &i32 {
+    pub fn get_int(&self) -> i32 {
         let int = match &self {
             Item::Int(int) => int,
             _ => unreachable!(),
         };
-        return int;
+        return *int;
     }
     #[allow(dead_code)]
-    pub fn get_str(&self) -> String {
+    pub fn get_str(&self) -> Vec<u8> {
         let str = match &self {
             Item::String(str) => str,
             _ => unreachable!(),
         };
-        return str.to_string();
+        return str.to_vec();
     }
     #[allow(dead_code)]
     pub fn get_list(&self) -> &Vec<Item> {
@@ -35,7 +35,7 @@ impl Item {
         return list;
     }
     #[allow(dead_code)]
-    pub fn get_dict(&self) -> &BTreeMap<String, Item> {
+    pub fn get_dict(&self) -> &BTreeMap<Vec<u8>, Item> {
         let dict = match &self {
             Item::Dict(dict) => dict,
             _ => unreachable!(),
@@ -57,7 +57,7 @@ fn parse_int(str: &mut Vec<char>) -> i32 {
     return int_string.parse::<i32>().unwrap();
 }
 
-fn parse_str(str: &mut Vec<char>) -> String {
+fn parse_str(str: &mut Vec<char>) -> Vec<u8> {
     let mut int_len: usize = 0;
     let mut int_string: String = String::new();
     for c in str.iter() {
@@ -68,9 +68,9 @@ fn parse_str(str: &mut Vec<char>) -> String {
     let len: usize = int_string.parse::<usize>().unwrap();
     str.drain(0..int_len);
 
-    let mut s: String = String::new();
+    let mut s: Vec<u8> = Vec::new();
     for i in 0..len {
-        s.push(str[i]);
+        s.push(str[i] as u8);
     }
     str.drain(0..len);
     return s;
@@ -92,9 +92,9 @@ fn parse_list(str: &mut Vec<char>) -> Vec<Item> {
     return list;
 }
 
-fn parse_dict(str: &mut Vec<char>) -> BTreeMap<String, Item> {
+fn parse_dict(str: &mut Vec<char>) -> BTreeMap<Vec<u8>, Item> {
     str.drain(0..1);
-    let mut dict: BTreeMap<String, Item> = BTreeMap::<String, Item>::new();
+    let mut dict: BTreeMap<Vec<u8>, Item> = BTreeMap::new();
     loop {
         if *str.iter().nth(0).unwrap() == 'e' { break }
         let s = parse_str(str);

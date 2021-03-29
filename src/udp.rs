@@ -108,15 +108,15 @@ pub fn get_info_hash(mut bytes: Vec<u8>) -> [u8; 20] {
 // gets the first UDP tracker addr from bencoded tree
 pub fn get_udp_addr(tree: Vec<Item>) -> SocketAddr {
     let dict = tree[0].get_dict();
-    let list = dict.get("announce-list").unwrap().get_list();
+    let list = dict.get("announce-list".as_bytes()).unwrap().get_list();
     let mut tracker = list[0].get_list()[0].get_str();
     for t in list.iter() {
         tracker = t.get_list()[0].get_str();
-        if tracker.chars().nth(0) == Some('u') { break }
+        if *tracker.iter().nth(0).unwrap() == ('u' as u8) { break }
     }
     tracker.drain(0.."udp://".len());
     tracker.truncate(tracker.len()-"/announce".len());
-    return tracker.to_socket_addrs().unwrap().nth(0).unwrap();
+    return std::str::from_utf8(&tracker).unwrap().to_socket_addrs().unwrap().nth(0).unwrap();
 }
 
 pub fn udp_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Vec<IpPort> {
