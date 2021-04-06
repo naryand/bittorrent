@@ -105,6 +105,7 @@ pub fn get_info_hash(mut bytes: Vec<u8>) -> [u8; 20] {
     return hasher.finalize().into();
 }
 
+#[allow(dead_code)]
 // gets the first UDP tracker addr from bencoded tree
 pub fn get_udp_addr(tree: Vec<Item>) -> SocketAddr {
     let dict = tree[0].get_dict();
@@ -119,6 +120,7 @@ pub fn get_udp_addr(tree: Vec<Item>) -> SocketAddr {
     return std::str::from_utf8(&tracker).unwrap().to_socket_addrs().unwrap().nth(0).unwrap();
 }
 
+#[allow(dead_code)]
 pub fn udp_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Vec<IpPort> {
     // set up udp socket
     let socket = UdpSocket::bind("0.0.0.0:25565").expect("bind error");

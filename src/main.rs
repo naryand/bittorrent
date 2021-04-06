@@ -1,11 +1,16 @@
-#![allow(dead_code)]
 mod bencode;
 mod udp;
 
-use std::{fmt, io::{Read, Write}, net::TcpStream, os::unix::prelude::FileExt, usize};
+use std::{fmt, fs::File, io::{Read, Write}, net::TcpStream, usize};
+
+#[cfg(target_family="windows")]
+use std::os::windows::prelude::*;
+#[cfg(target_family="unix")]
+use std::os::unix::fs::FileExt;
 
 use bencode::Item;
 use bencode::parse;
+
 use udp::*;
 
 use serde::{Serialize, Deserialize};
@@ -70,8 +75,6 @@ fn parse_u32(msg: &mut Vec<u8>) -> u32 {
     a.copy_from_slice(&msg[0..4]);
     let ret = u32::from_be_bytes(a);
     msg.drain(0..4);
-    // println!("{:#x}", ret);
-    if ret > 0x40000 { panic!("high") }
     return ret;
 }
 
@@ -149,10 +152,6 @@ pub fn parse_msg(msg: &mut Vec<u8>) -> Vec<Message> {
             Some(byte) => *byte,
             None => break,
         };
-        // println!("byte {}", byte);
-        if byte > CANCEL && byte != HANDSHAKE {
-            println!("{:?}", msg)
-        }
         match byte {
             CHOKE => list.push(Message::Choke(parse_header(msg))),
             UNCHOKE => list.push(Message::Unchoke(parse_header(msg))),
@@ -180,6 +179,8 @@ const REQUEST: u8 = 6;
 const PIECE: u8 = 7;
 const CANCEL: u8 = 8;
 const HANDSHAKE: u8 = 0x54;
+
+const SUBPIECE_LEN: u32 = 0x4000;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Handshake {
@@ -269,6 +270,48 @@ impl ByteField {
     }
 }
 
+// fetch and write subpiece
+fn fw_subpiece(stream: &mut TcpStream, index: u32, offset: u32, 
+               plen: u32, piece_len: u64, file: &File, field: &mut ByteField) {
+
+    let mut req = Request { 
+        head: Header { len: 13u32.to_be(), byte: REQUEST }, ..Default::default()
+    };
+
+    req.index = index.to_be();
+    req.offset = offset.to_be();
+    req.plen = plen.to_be();
+
+    let req_u8 = bincode::serialize(&req).unwrap();
+    stream.write_all(&req_u8).expect("write error");
+    
+    let mut buf: Vec<u8> = vec![0; (plen+13) as usize];
+    stream.read_exact(&mut buf).expect("read error");
+
+    let msg = parse_msg(&mut buf);
+    let mut piece: Piece = Default::default();
+    piece.data = Vec::new();
+
+    for m in msg {
+        piece = match m {
+            Message::Piece(piece) => piece,
+            _ => continue,
+        };
+
+        if piece.data.len() == 0 { continue }
+
+        let offset = (piece.index.to_le() as u64)*piece_len+(piece.offset.to_le() as u64);
+
+        #[cfg(target_family="windows")]
+        file.seek_write(&piece.data, offset).expect("file write error");
+        
+        #[cfg(target_family="unix")]
+        file.write_all_at(&piece.data, offset).expect("file write error");
+
+        field.arr[(piece.offset.to_le()/plen) as usize] = 1;
+    }
+}
+
 fn main() {
     let bytes: Vec<u8> = std::fs::read("./b.torrent").expect("read error");
     let mut str: Vec<char> = bytes.iter().map(|b| *b as char).collect::<Vec<_>>();
@@ -276,85 +319,90 @@ fn main() {
     let info_hash = get_info_hash(bytes);
     // let peers = udp_announce_tracker(get_udp_addr(tree), info_hash);
 
+
     let dict = tree[0].get_dict();
     let info = dict.get("info".as_bytes()).unwrap().get_dict();
     let piece_len = info.get("piece length".as_bytes()).unwrap().get_int() as u64;
     let num_pieces = (info.get("pieces".as_bytes()).unwrap().get_str().len()/20) as u64;
-    // let file_len = info.get("length".as_bytes()).unwrap().get_int() as u64;
+    let file_len = info.get("length".as_bytes()).unwrap().get_int() as u64;
 
-    let handshake = Handshake { 
-        info_hash: info_hash, peer_id: info_hash, ..Default::default() 
-    };
+
+    let handshake = Handshake { info_hash: info_hash, peer_id: info_hash, ..Default::default() };
+    let interest = Header { len: 1u32.to_be(), byte: INTEREST };
     let mut handshake_u8 = bincode::serialize(&handshake).unwrap();
 
-    let interest = Header { len: 1u32.to_be(), byte: INTEREST };
-    let mut interest_u8 = bincode::serialize(&interest).unwrap();
+    
+    let mut stream = TcpStream::connect("172.20.144.1:25663").expect("connect error");
+    handshake_u8.append(&mut bincode::serialize(&interest).unwrap());
+    stream.write_all(&handshake_u8).expect("handshake write error");
+    let mut buf: Vec<u8> = vec![0; 8192];
+    stream.read(&mut buf).expect("handshake read error");
+    std::mem::drop(buf);
+    
+    let file = std::fs::File::create("/home/naryan/b.mkv").unwrap();
+    
+    
 
     let mut req = Request { 
         head: Header { len: 13u32.to_be(), byte: REQUEST }, index: 0, offset: 0, plen: SUBPIECE_LEN.to_be() 
     };
- 
-    let mut stream = TcpStream::connect("127.0.0.1:25663").expect("connect error");
-    handshake_u8.append(&mut interest_u8);
-    stream.write_all(&handshake_u8).expect("handshake write error");
-    // stream.write_all(&interest_u8).expect("write error");
-    let mut buf: Vec<u8> = vec![0; 32768];
-    stream.read(&mut buf).expect("handshake read error");
-    // let msg = parse_msg(&mut buf);
-    // println!("{:?}", msg);
-    
-    let file = std::fs::File::create("/home/naryan/Desktop/b.mkv").unwrap();
-
-    const SUBPIECE_LEN: u32 = 0x4000;
     let num_subpieces = (piece_len as usize)>>14;
     let mut piece_field: ByteField = Default::default();
     piece_field.arr = vec![0; (num_pieces as usize)-1];
 
+    // all except last piece
     loop {
         let piece = piece_field.get_empty();
         if piece == None { break }
         let piece_idx = piece.unwrap();
-        println!("{}", piece_idx);
         
-        req.index = (piece_idx as u32).to_be();
+        req.index = piece_idx as u32;
         
         let mut subfield: ByteField = Default::default();
         subfield.arr = vec![0; num_subpieces];
+
+        // subpieces
         loop {
             let sub = subfield.get_empty();
             if sub == None { break }
             let sub_idx = sub.unwrap();
-            
-            req.offset = ((sub_idx as u32)*SUBPIECE_LEN).to_be();
-            
-            let mut buf: Vec<u8> = vec![0; (SUBPIECE_LEN+13) as usize];
-            let req_u8 = bincode::serialize(&req).unwrap();
-            stream.write_all(&req_u8).expect("write error");
 
-            // std::thread::sleep(std::time::Duration::from_micros(1));
-
-            stream.read_exact(&mut buf).expect("read error");
-            
-            let msg = parse_msg(&mut buf);
-            // println!("{:?}", msg);
-            let mut piece: Piece = Default::default();
-            piece.data = Vec::new();
-
-            for m in msg {
-                piece = match m {
-                    Message::Piece(piece) => piece,
-                    _ => continue,
-                };
-            
-                if piece.data.len() == 0 { continue }
-                
-                let offset = (piece.index.to_le() as u64)*piece_len+(piece.offset.to_le() as u64);
-                file.write_all_at(&piece.data, offset).expect("file write error");
-
-                subfield.arr[(piece.offset.to_le()/SUBPIECE_LEN) as usize] = 1;
-
-            }
+            req.offset = (sub_idx as u32)*SUBPIECE_LEN;
+            fw_subpiece(&mut stream, req.index, req.offset, 
+                   SUBPIECE_LEN, piece_len, &file, &mut subfield);
         }
+
         piece_field.arr[piece_idx] = 1;
     }
+
+
+    // last piece
+    let last_remainder: usize = (file_len-(num_pieces-1)*piece_len) as usize;
+    let num_last_subs: usize = last_remainder/SUBPIECE_LEN as usize;
+    let mut last_subfield: ByteField = Default::default();
+    last_subfield.arr = vec![0; num_last_subs];
+
+    // all except last subpiece
+    req.index = num_pieces as u32 - 1;
+    loop {
+        let sub = last_subfield.get_empty();
+        if sub == None { break }
+        let sub_idx = sub.unwrap();
+        
+        req.offset = (sub_idx as u32)*SUBPIECE_LEN;
+        
+        fw_subpiece(&mut stream, req.index, req.offset, 
+               SUBPIECE_LEN, piece_len, &file, &mut last_subfield);
+    }
+
+
+    // last subpiece
+    let last_sub_len: usize = last_remainder-(num_last_subs*SUBPIECE_LEN as usize);
+    let mut final_subfield: ByteField = Default::default();
+    
+    req.offset = (num_last_subs as u32)*SUBPIECE_LEN;
+    req.plen = last_sub_len as u32;
+    final_subfield.arr = vec![0; (req.offset/req.plen) as usize + 1];
+
+    fw_subpiece(&mut stream, req.index, req.offset, req.plen, piece_len, &file, &mut final_subfield);
 }
