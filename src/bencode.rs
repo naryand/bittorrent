@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Item {
-    Int(i32),
+    Int(i64),
     String(Vec<u8>),
     List(Vec<Item>),
     Dict(BTreeMap<Vec<u8>, Item>),
@@ -11,12 +11,12 @@ pub enum Item {
 
 impl Item {
     #[allow(dead_code)]
-    pub fn get_int(&self) -> i32 {
+    pub fn get_int(&self) -> i64 {
         let int = match &self {
             Item::Int(int) => int,
             _ => unreachable!(),
         };
-        return *int;
+        return int.clone();
     }
     #[allow(dead_code)]
     pub fn get_str(&self) -> Vec<u8> {
@@ -24,27 +24,27 @@ impl Item {
             Item::String(str) => str,
             _ => unreachable!(),
         };
-        return str.to_vec();
+        return str.clone();
     }
     #[allow(dead_code)]
-    pub fn get_list(&self) -> &Vec<Item> {
+    pub fn get_list(&self) -> Vec<Item> {
         let list = match &self {
             Item::List(list) => list,
             _ => unreachable!(),
         };
-        return list;
+        return list.clone();
     }
     #[allow(dead_code)]
-    pub fn get_dict(&self) -> &BTreeMap<Vec<u8>, Item> {
+    pub fn get_dict(&self) -> BTreeMap<Vec<u8>, Item> {
         let dict = match &self {
             Item::Dict(dict) => dict,
             _ => unreachable!(),
         };
-        return dict;
+        return dict.clone();
     }
 }
 
-fn parse_int(str: &mut Vec<char>) -> i32 {
+fn parse_int(str: &mut Vec<char>) -> i64 {
     let mut len: usize = 0;
     let mut int_string: String = String::new();
     for c in str.iter() {
@@ -54,7 +54,7 @@ fn parse_int(str: &mut Vec<char>) -> i32 {
         int_string.push(*c);
     }
     str.drain(0..len);
-    return int_string.parse::<i32>().unwrap();
+    return int_string.parse::<i64>().unwrap();
 }
 
 fn parse_str(str: &mut Vec<char>) -> Vec<u8> {
