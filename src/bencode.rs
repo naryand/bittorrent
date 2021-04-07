@@ -84,8 +84,9 @@ fn parse_list(str: &mut Vec<char>) -> Vec<Item> {
             'i' => list.push(Item::Int(parse_int(str))),
             'l' => list.push(Item::List(parse_list(str))),
             'd' => list.push(Item::Dict(parse_dict(str))),
+            '0'..='9' => list.push(Item::String(parse_str(str))),
             'e' => break,
-            _ => list.push(Item::String(parse_str(str))),
+            _ => break,
         }
     }
     str.drain(0..1);
@@ -102,7 +103,8 @@ fn parse_dict(str: &mut Vec<char>) -> BTreeMap<Vec<u8>, Item> {
             'i' => dict.insert(s, Item::Int(parse_int(str))),
             'l' => dict.insert(s, Item::List(parse_list(str))),
             'd' => dict.insert(s, Item::Dict(parse_dict(str))),
-            _ => dict.insert(s, Item::String(parse_str(str))),
+            '0'..='9' => dict.insert(s, Item::String(parse_str(str))),
+            _ => break,
         };
     }
     str.drain(0..1);
@@ -120,8 +122,8 @@ pub fn parse(str: &mut Vec<char>) -> Vec<Item> {
             'i' => tree.push(Item::Int(parse_int(str))),
             'l' => tree.push(Item::List(parse_list(str))),
             'd' => tree.push(Item::Dict(parse_dict(str))),
-            '\0' => break,
-            _ => tree.push(Item::String(parse_str(str))),
+            '0'..='9' => tree.push(Item::String(parse_str(str))),
+            _ => break,
         }
     }
     return tree;

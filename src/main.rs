@@ -113,13 +113,13 @@ fn parse_request(msg: &mut Vec<u8>) -> Request {
 
 fn parse_piece(msg: &mut Vec<u8>) -> Piece {
     let mut piece: Piece = Default::default();
-    // println!("{}", msg.len());
     piece.head = parse_header(msg);
     piece.index = parse_u32(msg);
     piece.offset = parse_u32(msg);
-    for i in 0..((piece.head.len-9) as usize) {
-        piece.data.push(msg[i]);
-    } msg.drain(0..((piece.head.len-9) as usize));
+    piece.data.append(&mut msg[0..((piece.head.len-9) as usize)].to_vec());
+    let mut copy = msg[((piece.head.len-9) as usize)..msg.len()].to_vec();
+    msg.clear();
+    msg.append(&mut copy);
     return piece;
 }
 
@@ -270,36 +270,43 @@ impl ByteField {
     }
 }
 
-// fetch and write subpiece
-fn fw_subpiece(stream: &mut TcpStream, index: u32, offset: u32, 
-               plen: u32, piece_len: u64, file: &File, field: &mut ByteField) {
-
+fn fetch_subpiece(stream: &mut TcpStream, index: u32, offset: u32, 
+               plen: u32, field: &mut ByteField) -> Option<Piece> {
     let mut req = Request { 
         head: Header { len: 13u32.to_be(), byte: REQUEST }, ..Default::default()
     };
-
+    
     req.index = index.to_be();
     req.offset = offset.to_be();
     req.plen = plen.to_be();
-
+    
     let req_u8 = bincode::serialize(&req).unwrap();
+    let mut buf: Vec<u8> = vec![0; (plen+13) as usize];
+    
     stream.write_all(&req_u8).expect("write error");
     
-    let mut buf: Vec<u8> = vec![0; (plen+13) as usize];
     stream.read_exact(&mut buf).expect("read error");
-
+    
     let msg = parse_msg(&mut buf);
     let mut piece: Piece = Default::default();
     piece.data = Vec::new();
-
+    
     for m in msg {
         piece = match m {
             Message::Piece(piece) => piece,
             _ => continue,
         };
-
+        
         if piece.data.len() == 0 { continue }
+        
+        field.arr[(piece.offset.to_le()/plen) as usize] = 1;
+        
+        return Some(piece);
+    }
+    return None;
+}
 
+fn write_subpiece(piece: Piece, file: &File, piece_len: u64) {
         let offset = (piece.index.to_le() as u64)*piece_len+(piece.offset.to_le() as u64);
 
         #[cfg(target_family="windows")]
@@ -307,13 +314,10 @@ fn fw_subpiece(stream: &mut TcpStream, index: u32, offset: u32,
         
         #[cfg(target_family="unix")]
         file.write_all_at(&piece.data, offset).expect("file write error");
-
-        field.arr[(piece.offset.to_le()/plen) as usize] = 1;
-    }
 }
 
 fn main() {
-    let bytes: Vec<u8> = std::fs::read("./b.torrent").expect("read error");
+    let bytes: Vec<u8> = std::fs::read("./a.torrent").expect("read error");
     let mut str: Vec<char> = bytes.iter().map(|b| *b as char).collect::<Vec<_>>();
     let tree: Vec<Item> = parse(&mut str);
     let info_hash = get_info_hash(bytes);
@@ -339,8 +343,8 @@ fn main() {
     stream.read(&mut buf).expect("handshake read error");
     std::mem::drop(buf);
     
-    let file = std::fs::File::create("/home/naryan/b.mkv").unwrap();
-    
+    let file = std::fs::File::create("/home/naryan/d.mkv").unwrap();
+    let mut pieces: Vec<Piece> = Vec::new();
     
 
     let mut req = Request { 
@@ -368,8 +372,8 @@ fn main() {
             let sub_idx = sub.unwrap();
 
             req.offset = (sub_idx as u32)*SUBPIECE_LEN;
-            fw_subpiece(&mut stream, req.index, req.offset, 
-                   SUBPIECE_LEN, piece_len, &file, &mut subfield);
+            pieces.push(fetch_subpiece(&mut stream, req.index, req.offset, 
+                      SUBPIECE_LEN, &mut subfield).unwrap());
         }
 
         piece_field.arr[piece_idx] = 1;
@@ -391,8 +395,8 @@ fn main() {
         
         req.offset = (sub_idx as u32)*SUBPIECE_LEN;
         
-        fw_subpiece(&mut stream, req.index, req.offset, 
-               SUBPIECE_LEN, piece_len, &file, &mut last_subfield);
+        pieces.push(fetch_subpiece(&mut stream, req.index, req.offset, 
+                  SUBPIECE_LEN, &mut last_subfield).unwrap());
     }
 
 
@@ -404,5 +408,11 @@ fn main() {
     req.plen = last_sub_len as u32;
     final_subfield.arr = vec![0; (req.offset/req.plen) as usize + 1];
 
-    fw_subpiece(&mut stream, req.index, req.offset, req.plen, piece_len, &file, &mut final_subfield);
+    pieces.push(fetch_subpiece(&mut stream, req.index, req.offset, 
+                   req.plen, &mut final_subfield).unwrap());
+
+    // write subpieces
+    for p in pieces {
+        write_subpiece(p, &file, piece_len)
+    }
 }
