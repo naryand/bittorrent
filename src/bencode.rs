@@ -86,7 +86,7 @@ fn parse_list(str: &mut Vec<char>) -> Vec<Item> {
             'd' => list.push(Item::Dict(parse_dict(str))),
             '0'..='9' => list.push(Item::String(parse_str(str))),
             'e' => break,
-            _ => break,
+            _ => unreachable!(),
         }
     }
     str.drain(0..1);
@@ -104,7 +104,7 @@ fn parse_dict(str: &mut Vec<char>) -> BTreeMap<Vec<u8>, Item> {
             'l' => dict.insert(s, Item::List(parse_list(str))),
             'd' => dict.insert(s, Item::Dict(parse_dict(str))),
             '0'..='9' => dict.insert(s, Item::String(parse_str(str))),
-            _ => break,
+            _ => unreachable!(),
         };
     }
     str.drain(0..1);

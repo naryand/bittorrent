@@ -1,7 +1,7 @@
 mod bencode;
 mod udp;
 
-use std::{fmt, fs::File, io::{Read, Write}, net::TcpStream, usize};
+use std::{fmt, fs::File, io::{Read, Write}, net::TcpStream, thread::{self, JoinHandle}, usize, vec};
 
 #[cfg(target_family="windows")]
 use std::os::windows::prelude::*;
@@ -14,6 +14,8 @@ use bencode::parse;
 use udp::*;
 
 use serde::{Serialize, Deserialize};
+use sha1::{Sha1, Digest};
+
 // #[derive(Debug)]
 pub enum Message {
     Handshake(Handshake),
@@ -306,36 +308,85 @@ fn fetch_subpiece(stream: &mut TcpStream, index: u32, offset: u32,
     return None;
 }
 
-fn write_subpiece(piece: Piece, file: &File, piece_len: u64) {
-        let offset = (piece.index.to_le() as u64)*piece_len+(piece.offset.to_le() as u64);
+fn write_subpiece(subpiece: Piece, file: &File, piece_len: u64) {
+        let offset = (subpiece.index.to_le() as u64)*piece_len+(subpiece.offset.to_le() as u64);
 
         #[cfg(target_family="windows")]
         file.seek_write(&piece.data, offset).expect("file write error");
         
         #[cfg(target_family="unix")]
-        file.write_all_at(&piece.data, offset).expect("file write error");
+        file.write_all_at(&subpiece.data, offset).expect("file write error");
+}
+
+fn hash(pieces: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    const NUM_THREADS: usize = 240;
+    let mut threads: Vec<JoinHandle<Vec<Vec<u8>>>> = vec![];
+
+    for chunk in pieces.chunks(pieces.len()/NUM_THREADS) {
+        let pieces_chunk: Vec<Vec<u8>> = chunk.to_owned();
+        let handle: JoinHandle<Vec<Vec<u8>>> = thread::spawn(move || {
+
+            let mut hashes_chunk: Vec<Vec<u8>> = vec![];
+            for i in 0..pieces_chunk.len() {
+                let mut hasher = Sha1::new();
+                hasher.update(&pieces_chunk[i]);
+                hashes_chunk.push(hasher.finalize().to_vec());
+            }
+            return hashes_chunk;
+        });
+        threads.push(handle);
+    }
+    
+    let mut piece_hashes: Vec<Vec<u8>> = vec![];
+    for handle in threads {
+        piece_hashes.extend_from_slice(&handle.join().unwrap());
+    }
+
+    return piece_hashes;
+}
+
+fn subpieces_check_hash(subpieces: &Vec<Piece>, hashes: Vec<u8>) -> bool {
+    let num_pieces: usize = hashes.len()/20;
+    let mut pieces = vec![vec![0; 0]; num_pieces];
+    for s in subpieces {
+        pieces[s.index.to_le() as usize].extend_from_slice(&s.data);
+    }
+    let mut split_hashes: Vec<Vec<u8>> = vec![vec![0; 0]; num_pieces];
+    for i in 0..num_pieces {
+        split_hashes[i].extend_from_slice(&hashes[(i*20)..((i+1)*20)])
+    }
+    
+    let piece_hashes: Vec<Vec<u8>> = hash(pieces);
+    for i in 0..num_pieces {
+        if piece_hashes[i].iter().zip(&split_hashes[i]).filter(|&(a, b)| a == b).count() != 20 {
+            return false
+        }
+    }
+    return true
 }
 
 fn main() {
+    // read and parse torrent file
     let bytes: Vec<u8> = std::fs::read("./a.torrent").expect("read error");
     let mut str: Vec<char> = bytes.iter().map(|b| *b as char).collect::<Vec<_>>();
     let tree: Vec<Item> = parse(&mut str);
     let info_hash = get_info_hash(bytes);
     // let peers = udp_announce_tracker(get_udp_addr(tree), info_hash);
 
-
+    // get info dict values
     let dict = tree[0].get_dict();
     let info = dict.get("info".as_bytes()).unwrap().get_dict();
     let piece_len = info.get("piece length".as_bytes()).unwrap().get_int() as u64;
     let num_pieces = (info.get("pieces".as_bytes()).unwrap().get_str().len()/20) as u64;
     let file_len = info.get("length".as_bytes()).unwrap().get_int() as u64;
+    let hashes = info.get("pieces".as_bytes()).unwrap().get_str();
 
-
+    // make handshake
     let handshake = Handshake { info_hash: info_hash, peer_id: info_hash, ..Default::default() };
     let interest = Header { len: 1u32.to_be(), byte: INTEREST };
     let mut handshake_u8 = bincode::serialize(&handshake).unwrap();
 
-    
+    // connect and send handshake
     let mut stream = TcpStream::connect("172.20.144.1:25663").expect("connect error");
     handshake_u8.append(&mut bincode::serialize(&interest).unwrap());
     stream.write_all(&handshake_u8).expect("handshake write error");
@@ -343,10 +394,11 @@ fn main() {
     stream.read(&mut buf).expect("handshake read error");
     std::mem::drop(buf);
     
+    // make dest file
     let file = std::fs::File::create("/home/naryan/d.mkv").unwrap();
-    let mut pieces: Vec<Piece> = Vec::new();
     
-
+    // make request and piece bytefield
+    let mut subpieces: Vec<Piece> = Vec::new();
     let mut req = Request { 
         head: Header { len: 13u32.to_be(), byte: REQUEST }, index: 0, offset: 0, plen: SUBPIECE_LEN.to_be() 
     };
@@ -354,6 +406,7 @@ fn main() {
     let mut piece_field: ByteField = Default::default();
     piece_field.arr = vec![0; (num_pieces as usize)-1];
 
+    // get pieces
     // all except last piece
     loop {
         let piece = piece_field.get_empty();
@@ -372,7 +425,7 @@ fn main() {
             let sub_idx = sub.unwrap();
 
             req.offset = (sub_idx as u32)*SUBPIECE_LEN;
-            pieces.push(fetch_subpiece(&mut stream, req.index, req.offset, 
+            subpieces.push(fetch_subpiece(&mut stream, req.index, req.offset, 
                       SUBPIECE_LEN, &mut subfield).unwrap());
         }
 
@@ -395,7 +448,7 @@ fn main() {
         
         req.offset = (sub_idx as u32)*SUBPIECE_LEN;
         
-        pieces.push(fetch_subpiece(&mut stream, req.index, req.offset, 
+        subpieces.push(fetch_subpiece(&mut stream, req.index, req.offset, 
                   SUBPIECE_LEN, &mut last_subfield).unwrap());
     }
 
@@ -408,11 +461,14 @@ fn main() {
     req.plen = last_sub_len as u32;
     final_subfield.arr = vec![0; (req.offset/req.plen) as usize + 1];
 
-    pieces.push(fetch_subpiece(&mut stream, req.index, req.offset, 
+    subpieces.push(fetch_subpiece(&mut stream, req.index, req.offset, 
                    req.plen, &mut final_subfield).unwrap());
+    
+    // check piece hashes
+    if !subpieces_check_hash(&subpieces, hashes) { panic!("hashes don't match") }
 
     // write subpieces
-    for p in pieces {
+    for p in subpieces {
         write_subpiece(p, &file, piece_len)
     }
 }
