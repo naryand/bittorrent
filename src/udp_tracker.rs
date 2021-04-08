@@ -1,8 +1,6 @@
 use crate::bencode::Item;
 
-use std::{fmt, usize};
-use std::net::UdpSocket;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::{fmt, usize, net::{SocketAddr, ToSocketAddrs, UdpSocket}};
 
 use rand::random;
 use sha1::{Sha1, Digest};
