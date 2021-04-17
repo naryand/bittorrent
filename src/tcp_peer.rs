@@ -1,4 +1,5 @@
-use std::{fmt, fs::File, io::{Read, Write}, net::TcpStream, thread::{self, JoinHandle}, usize, vec};
+use std::{fmt, fs::File, io::{Read, Write}, net::TcpStream, 
+          sync::{Arc, Mutex}, thread::{self, JoinHandle}, usize, vec};
 
 #[cfg(target_family="windows")]
 use std::os::windows::prelude::*;
@@ -9,7 +10,7 @@ use serde::{Serialize, Deserialize};
 use sha1::{Sha1, Digest};
 
 // #[derive(Debug)]
-pub enum Message {
+enum Message {
     Handshake(Handshake),
     Choke(Header),
     Unchoke(Header),
@@ -134,7 +135,7 @@ fn is_zero(msg: &Vec<u8>) -> bool {
     } return true;
 }
 
-pub fn parse_msg(msg: &mut Vec<u8>) -> Vec<Message> {
+fn parse_msg(msg: &mut Vec<u8>) -> Vec<Message> {
     let mut list = Vec::<Message>::new();
     loop {
         if is_zero(msg) { break }
@@ -177,7 +178,7 @@ const HANDSHAKE: u8 = 0x54;
 const SUBPIECE_LEN: u32 = 0x4000;
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Handshake {
+struct Handshake {
     len: u8,
     protocol: [u8; 19],
     reserved: [u8; 8],
@@ -185,32 +186,32 @@ pub struct Handshake {
     peer_id: [u8; 20],
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Header {
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+struct Header {
     len: u32,
     byte: u8,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Have {
+struct Have {
     head: Header,
     index: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Bitfield {
+struct Bitfield {
     head: Header,
     data: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Request {
+struct Request {
     head: Header,
     index: u32,
     offset: u32,
     plen: u32,
 }
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct Piece {
     head: Header,
     index: u32,
@@ -219,7 +220,7 @@ pub struct Piece {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Cancel {
+struct Cancel {
     head: Header,
     index: u32,
     offset: u32,
@@ -264,6 +265,19 @@ impl ByteField {
     }
 }
 
+pub fn send_handshake(stream: &mut TcpStream, info_hash: [u8; 20], peer_id: [u8; 20]) {
+    // make handshake
+    let handshake = Handshake { info_hash: info_hash, peer_id: peer_id, ..Default::default() };
+    let interest = Header { len: 1u32.to_be(), byte: INTEREST };
+    let mut handshake_u8 = bincode::serialize(&handshake).unwrap();
+
+    // send hanshake
+    handshake_u8.append(&mut bincode::serialize(&interest).unwrap());
+    stream.write_all(&handshake_u8).expect("handshake write error");
+    let mut buf: Vec<u8> = vec![0; 8192];
+    stream.read(&mut buf).expect("handshake read error");
+}
+
 fn fetch_subpiece(stream: &mut TcpStream, index: u32, offset: u32, 
                plen: u32, field: &mut ByteField) -> Option<Piece> {
     let mut req = Request { 
@@ -300,95 +314,67 @@ fn fetch_subpiece(stream: &mut TcpStream, index: u32, offset: u32,
     return None;
 }
 
-pub fn write_subpieces(subpieces: Vec<Piece>, file: &File, piece_len: u64) {
-    for s in subpieces {
-        let offset = (s.index.to_le() as u64)*piece_len+(s.offset.to_le() as u64);
-
-        #[cfg(target_family="windows")]
-        file.seek_write(&s.data, offset).expect("file write error");
-        
-        #[cfg(target_family="unix")]
-        file.write_all_at(&s.data, offset).expect("file write error");
+pub fn hash_write_piece(piece: Vec<Piece>, hash: Vec<u8>, 
+                        file: &Arc<Mutex<File>>, piece_len: usize) -> JoinHandle<()> {
+    let mut flat_piece: Vec<u8> = vec![];
+    for s in piece.iter() {
+        flat_piece.extend_from_slice(&s.data); // assumes ordered by offset
     }
-}
 
-fn hash(pieces: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
-    const NUM_THREADS: usize = 240;
-    let mut threads: Vec<JoinHandle<Vec<Vec<u8>>>> = vec![];
+    let f = Arc::clone(file);
 
-    for chunk in pieces.chunks(pieces.len()/NUM_THREADS) {
-        let pieces_chunk: Vec<Vec<u8>> = chunk.to_owned();
-        let handle: JoinHandle<Vec<Vec<u8>>> = thread::spawn(move || {
+    let handle = thread::spawn(move || {
+        let mut hasher = Sha1::new();
+        hasher.update(flat_piece);
+        let piece_hash = hasher.finalize().to_vec();
 
-            let mut hashes_chunk: Vec<Vec<u8>> = vec![];
-            for i in 0..pieces_chunk.len() {
-                let mut hasher = Sha1::new();
-                hasher.update(&pieces_chunk[i]);
-                hashes_chunk.push(hasher.finalize().to_vec());
+        if piece_hash.iter().zip(&hash).filter(|&(a, b)| a == b).count() != 20 {
+            panic!("hashes don't match");
+        }
+
+        for s in piece.iter() {
+            let offset = (s.index.to_le() as usize*piece_len)+s.offset.to_le() as usize;
+            // critical section
+            { 
+                let file = f.lock().unwrap();
+                #[cfg(target_family="windows")]
+                file.seek_write(&s.data, offset as u64).expect("file write error");
+                #[cfg(target_family="unix")]
+                file.write_all_at(&s.data, offset as u64).expect("file write error");
             }
-            return hashes_chunk;
-        });
-        threads.push(handle);
-    }
-    
-    let mut piece_hashes: Vec<Vec<u8>> = vec![];
-    for handle in threads {
-        piece_hashes.extend_from_slice(&handle.join().unwrap());
-    }
-
-    return piece_hashes;
+        }
+    });
+    return handle;
 }
 
-pub fn subpieces_check_hash(subpieces: &Vec<Piece>, hashes: Vec<u8>) -> bool {
+pub fn split_hashes(hashes: Vec<u8>) -> Vec<Vec<u8>> {
     let num_pieces: usize = hashes.len()/20;
-    let mut pieces = vec![vec![0; 0]; num_pieces];
-    for s in subpieces {
-        pieces[s.index.to_le() as usize].extend_from_slice(&s.data);
-    }
     let mut split_hashes: Vec<Vec<u8>> = vec![vec![0; 0]; num_pieces];
     for i in 0..num_pieces {
         split_hashes[i].extend_from_slice(&hashes[(i*20)..((i+1)*20)])
     }
-    
-    let piece_hashes: Vec<Vec<u8>> = hash(pieces);
-    for i in 0..num_pieces {
-        if piece_hashes[i].iter().zip(&split_hashes[i]).filter(|&(a, b)| a == b).count() != 20 {
-            return false
-        }
-    }
-    return true
+    return split_hashes;
 }
 
-pub fn send_handshake(stream: &mut TcpStream, info_hash: [u8; 20], peer_id: [u8; 20]) {
-    // make handshake
-    let handshake = Handshake { info_hash: info_hash, peer_id: peer_id, ..Default::default() };
-    let interest = Header { len: 1u32.to_be(), byte: INTEREST };
-    let mut handshake_u8 = bincode::serialize(&handshake).unwrap();
+pub fn get_file(stream: &mut TcpStream, piece_len: usize, num_pieces: usize, file_len: usize,
+                hashes: Vec<Vec<u8>>, file: &Arc<Mutex<File>>) {
 
-    // send hanshake
-    handshake_u8.append(&mut bincode::serialize(&interest).unwrap());
-    stream.write_all(&handshake_u8).expect("handshake write error");
-    let mut buf: Vec<u8> = vec![0; 8192];
-    stream.read(&mut buf).expect("handshake read error");
-}
-
-pub fn get_subpieces(stream: &mut TcpStream, piece_len: u64, num_pieces: u64, file_len: u64) -> Vec<Piece> {
-
+    let mut threads: Vec<JoinHandle<()>> = vec![];
     // make request and piece bytefield
-    let mut subpieces: Vec<Piece> = Vec::new();
     let mut req = Request { 
         head: Header { len: 13u32.to_be(), byte: REQUEST }, index: 0, offset: 0, plen: SUBPIECE_LEN.to_be() 
     };
-    let num_subpieces = (piece_len as usize)>>14;
+    let num_subpieces = piece_len/SUBPIECE_LEN as usize;
     let mut piece_field: ByteField = Default::default();
-    piece_field.arr = vec![0; (num_pieces as usize)-1];
+    piece_field.arr = vec![0; num_pieces-1];
 
     // get pieces
     // all except last piece
     loop {
-        let piece = piece_field.get_empty();
-        if piece == None { break }
-        let piece_idx = piece.unwrap();
+        let mut piece: Vec<Piece> = vec![];
+        let p = piece_field.get_empty();
+        if p == None { break }
+        let piece_idx = p.unwrap();
         
         req.index = piece_idx as u32;
         
@@ -402,16 +388,18 @@ pub fn get_subpieces(stream: &mut TcpStream, piece_len: u64, num_pieces: u64, fi
             let sub_idx = sub.unwrap();
 
             req.offset = (sub_idx as u32)*SUBPIECE_LEN;
-            subpieces.push(fetch_subpiece(stream, req.index, req.offset, 
+            piece.push(fetch_subpiece(stream, req.index, req.offset, 
                       SUBPIECE_LEN, &mut subfield).unwrap());
         }
-
+        piece.sort_by_key(|x| x.offset);
+        threads.push(
+            hash_write_piece(piece.to_vec(), hashes[piece_idx].to_vec(), file, piece_len));
         piece_field.arr[piece_idx] = 1;
     }
 
-
+    let mut piece: Vec<Piece> = vec![];
     // last piece
-    let last_remainder: usize = (file_len-(num_pieces-1)*piece_len) as usize;
+    let last_remainder: usize = file_len-(num_pieces-1)*piece_len;
     let num_last_subs: usize = last_remainder/SUBPIECE_LEN as usize;
     let mut last_subfield: ByteField = Default::default();
     last_subfield.arr = vec![0; num_last_subs];
@@ -425,7 +413,7 @@ pub fn get_subpieces(stream: &mut TcpStream, piece_len: u64, num_pieces: u64, fi
         
         req.offset = (sub_idx as u32)*SUBPIECE_LEN;
         
-        subpieces.push(fetch_subpiece(stream, req.index, req.offset, 
+        piece.push(fetch_subpiece(stream, req.index, req.offset, 
                   SUBPIECE_LEN, &mut last_subfield).unwrap());
     }
 
@@ -438,8 +426,13 @@ pub fn get_subpieces(stream: &mut TcpStream, piece_len: u64, num_pieces: u64, fi
     req.plen = last_sub_len as u32;
     final_subfield.arr = vec![0; (req.offset/req.plen) as usize + 1];
 
-    subpieces.push(fetch_subpiece(stream, req.index, req.offset, 
+    piece.push(fetch_subpiece(stream, req.index, req.offset, 
                    req.plen, &mut final_subfield).unwrap());
+    piece.sort_by_key(|x| x.offset);
+    threads.push(
+        hash_write_piece(piece.to_vec(), hashes[num_pieces-1].to_vec(), file, piece_len));
     
-    return subpieces;
+    for t in threads {
+        t.join().unwrap();
+    }
 }

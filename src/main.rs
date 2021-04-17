@@ -6,7 +6,7 @@ use bencode::*;
 use udp_tracker::*;
 use tcp_peer::*;
 
-use std::{net::TcpStream};
+use std::{net::TcpStream, sync::{Arc, Mutex}, fs::File};
 
 fn main() {
     // read and parse torrent file
@@ -19,25 +19,20 @@ fn main() {
     // get info dict values
     let dict = tree[0].get_dict();
     let info = dict.get("info".as_bytes()).unwrap().get_dict();
-    let piece_len = info.get("piece length".as_bytes()).unwrap().get_int() as u64;
-    let num_pieces = (info.get("pieces".as_bytes()).unwrap().get_str().len()/20) as u64;
-    let file_len = info.get("length".as_bytes()).unwrap().get_int() as u64;
+    let piece_len = info.get("piece length".as_bytes()).unwrap().get_int() as usize;
+    let num_pieces = (info.get("pieces".as_bytes()).unwrap().get_str().len()/20) as usize;
+    let file_len = info.get("length".as_bytes()).unwrap().get_int() as usize;
     let hashes = info.get("pieces".as_bytes()).unwrap().get_str();
+    let split_hashes = split_hashes(hashes);
 
 
     // connect and send handshake
-    let mut stream = TcpStream::connect("172.20.144.1:25663").expect("connect error");
+    let mut stream = TcpStream::connect("172.21.0.1:25663").expect("connect error");
     send_handshake(&mut stream, info_hash, info_hash);
     
     // make dest file
-    let file = std::fs::File::create("/home/naryan/d.mkv").unwrap();
-    
-    // get subpieces
-    let subpieces: Vec<Piece> = get_subpieces(&mut stream, piece_len, num_pieces, file_len);
-    
-    // check piece hashes
-    if !subpieces_check_hash(&subpieces, hashes) { panic!("hashes don't match") }
+    let file = Arc::new(Mutex::new(File::create("/home/naryan/b.mkv").unwrap()));
 
-    // write subpieces
-    write_subpieces(subpieces, &file, piece_len);
+    // get file
+    get_file(&mut stream, piece_len, num_pieces, file_len, split_hashes, &file);
 }
