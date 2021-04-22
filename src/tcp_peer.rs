@@ -160,7 +160,7 @@ fn parse_msg(msg: &mut Vec<u8>) -> Vec<Message> {
             PIECE => list.push(Message::Piece(parse_piece(msg))),
             CANCEL => list.push(Message::Cancel(parse_cancel(msg))),
             HANDSHAKE => list.push(Message::Handshake(parse_handshake(msg))),
-            _ => unreachable!(),
+            _ => unreachable!("parse_msg"),
         }
     }
     return list;
@@ -177,7 +177,7 @@ const PIECE: u8 = 7;
 const CANCEL: u8 = 8;
 const HANDSHAKE: u8 = 0x54;
 
-const SUBPIECE_LEN: u32 = 0x4000;
+pub const SUBPIECE_LEN: u32 = 0x4000;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Handshake {
@@ -245,8 +245,8 @@ impl Default for Handshake {
 }
 
 #[derive(Default)]
-struct ByteField {
-    arr: Vec<u8>,
+pub struct ByteField {
+    pub arr: Vec<u8>,
 }
 
 impl ByteField {
@@ -291,11 +291,11 @@ fn fetch_subpiece(stream: &mut TcpStream, index: u32, offset: u32,
     req.plen = plen.to_be();
     
     let req_u8 = bincode::serialize(&req).unwrap();
-    let mut buf: Vec<u8> = vec![0; (plen+13) as usize];
+    let mut buf: Vec<u8> = vec![0; 32767];
     
     stream.write_all(&req_u8).expect("write error");
     
-    stream.read_exact(&mut buf).expect("read error");
+    stream.read(&mut buf).expect("read error");
     
     let msg = parse_msg(&mut buf);
     let mut piece: Piece = Default::default();
@@ -430,6 +430,110 @@ pub fn get_file(stream: &mut TcpStream, piece_len: usize, num_pieces: usize, fil
 
     piece.push(fetch_subpiece(stream, req.index, req.offset, 
                    req.plen, &mut final_subfield).unwrap());
+    piece.sort_by_key(|x| x.offset);
+    threads.push(
+        hash_write_piece(piece.to_vec(), hashes[num_pieces-1].to_vec(), file, piece_len));
+    
+    for t in threads {
+        t.join().unwrap();
+    }
+}
+
+pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize, file_len: usize,
+                hashes: &Vec<Vec<u8>>, file: &Arc<Mutex<File>>, field: &Arc<Mutex<ByteField>>) {
+
+    let mut threads: Vec<JoinHandle<()>> = vec![];
+    // make request and piece bytefield
+    let mut req = Request { 
+        head: Header { len: 13u32.to_be(), byte: REQUEST }, index: 0, offset: 0, plen: SUBPIECE_LEN.to_be() 
+    };
+    let num_subpieces = piece_len/SUBPIECE_LEN as usize;
+
+    let piece_field = field.clone();
+
+    // get pieces
+    // all except last piece
+    loop {
+        let mut piece: Vec<Piece> = vec![];
+        let piece_idx;
+        { // critical section
+            let mut pf = piece_field.lock().unwrap();
+            piece_idx = match pf.get_empty() {
+                Some(p) => p,
+                None => break
+            };
+            pf.arr[piece_idx] = 1;
+        }
+        
+        req.index = piece_idx as u32;
+        
+        let mut subfield: ByteField = Default::default();
+        subfield.arr = vec![0; num_subpieces];
+
+        // subpieces
+        loop {
+            let sub_idx = match subfield.get_empty() {
+                Some(sub) => sub,
+                None => break
+            };
+
+            req.offset = (sub_idx as u32)*SUBPIECE_LEN;
+            match fetch_subpiece(stream, req.index, req.offset, SUBPIECE_LEN, &mut subfield) {
+                Some(s) => {
+                    subfield.arr[sub_idx] = 1;
+                    piece.push(s);
+                },
+                None => continue,
+            }
+        }
+        piece.sort_by_key(|x| x.offset);
+        threads.push(
+            hash_write_piece(piece.to_vec(), hashes[piece_idx].to_vec(), file, piece_len));
+    }
+
+    let mut piece: Vec<Piece> = vec![];
+    // last piece
+    let last_remainder: usize = file_len-(num_pieces-1)*piece_len;
+    let num_last_subs: usize = last_remainder/SUBPIECE_LEN as usize;
+    let mut last_subfield: ByteField = Default::default();
+    last_subfield.arr = vec![0; num_last_subs];
+
+    // all except last subpiece
+    req.index = num_pieces as u32 - 1;
+    loop {
+        let sub = last_subfield.get_empty();
+        if sub == None { break }
+        let sub_idx = sub.unwrap();
+        
+        req.offset = (sub_idx as u32)*SUBPIECE_LEN;
+        
+        match fetch_subpiece(stream, req.index, req.offset, SUBPIECE_LEN, &mut last_subfield) {
+            Some(s) => {
+                last_subfield.arr[sub_idx] = 1;
+                piece.push(s);
+            },
+            None => continue,
+        }
+    }
+
+
+    // last subpiece
+    loop {
+        let last_sub_len: usize = last_remainder-(num_last_subs*SUBPIECE_LEN as usize);
+        let mut final_subfield: ByteField = Default::default();
+        
+        req.offset = (num_last_subs as u32)*SUBPIECE_LEN;
+        req.plen = last_sub_len as u32;
+        final_subfield.arr = vec![0; (req.offset/req.plen) as usize + 1];
+
+        match fetch_subpiece(stream, req.index, req.offset, SUBPIECE_LEN, &mut final_subfield) {
+            Some(s) => {
+                piece.push(s);
+                break
+            },
+            None => continue,
+        }
+    }
     piece.sort_by_key(|x| x.offset);
     threads.push(
         hash_write_piece(piece.to_vec(), hashes[num_pieces-1].to_vec(), file, piece_len));
