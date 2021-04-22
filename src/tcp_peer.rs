@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{fmt, fs::File, io::{Read, Write}, net::TcpStream, 
           sync::{Arc, Mutex}, thread::{self, JoinHandle}, usize, vec};
 
