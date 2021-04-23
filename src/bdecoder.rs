@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Item {
     Int(i64),
     String(Vec<u8>),

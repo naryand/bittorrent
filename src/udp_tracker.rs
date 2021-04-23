@@ -43,8 +43,8 @@ struct AnnounceReq {
 
 #[derive(Serialize, Deserialize, Copy, Clone)]
 pub struct IpPort {
-    ip: u32,
-    port: u16,
+    pub ip: u32,
+    pub port: u16,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
