@@ -9,7 +9,7 @@ use std::os::windows::prelude::*;
 use std::os::unix::fs::FileExt;
 
 use serde::{Serialize, Deserialize};
-use sha1::{Sha1, Digest};
+use sha1::{Digest, Sha1};
 
 // #[derive(Debug)]
 enum Message {
@@ -42,9 +42,10 @@ impl fmt::Debug for Message {
     }
 }
 
-fn parse_handshake(msg: &mut Vec<u8>) -> Handshake {
+fn parse_handshake(msg: &mut Vec<u8>) -> Option<Handshake> {
     let mut handshake: Handshake = Default::default();
-
+    if msg.len() < 68 { return None; }
+    
     handshake.len = msg[0];
     msg.drain(0..1);
 
@@ -63,8 +64,10 @@ fn parse_handshake(msg: &mut Vec<u8>) -> Handshake {
     for i in 0..20 {
         handshake.peer_id[i] = msg[i];
     } msg.drain(0..20);
+
+    if !handshake.test() { return None; }
  
-    return handshake;
+    return Some(handshake);
 }
 
 fn parse_u32(msg: &mut Vec<u8>) -> u32 {
@@ -75,58 +78,85 @@ fn parse_u32(msg: &mut Vec<u8>) -> u32 {
     return ret;
 }
 
-fn parse_header(msg: &mut Vec<u8>) -> Header {
+fn parse_header(msg: &mut Vec<u8>) -> Option<Header> {
     let mut head: Header = Default::default();
+    if msg.len() < 5 { return None; }
     head.len = parse_u32(msg);
     head.byte = msg[0];
     msg.drain(0..1);
-    return head;
+    if !head.test() { return None; }
+    return Some(head);
 }
 
-fn parse_have(msg: &mut Vec<u8>) -> Have {
+fn parse_have(msg: &mut Vec<u8>) -> Option<Have> {
     let mut have: Have = Default::default();
-    have.head = parse_header(msg);
+    if msg.len() < 9 { return None; }
+    have.head = match parse_header(msg) {
+        Some(h) => h,
+        None => return None,
+    };
     have.index = parse_u32(msg);
-    return have;
+    if !have.test() { return None; }
+    return Some(have);
 }
 
-fn parse_bitfield(msg: &mut Vec<u8>) -> Bitfield {
+fn parse_bitfield(msg: &mut Vec<u8>) -> Option<Bitfield> {
     let mut bitfield: Bitfield = Default::default();
-    bitfield.head = parse_header(msg);
+    bitfield.head = match parse_header(msg) {
+        Some(h) => h,
+        None => return None,
+    };
+    if msg.len() < (bitfield.head.len-1) as usize { return None; }
     for i in 0..((bitfield.head.len-1) as usize) {
         bitfield.data.push(msg[i]);
     } msg.drain(0..((bitfield.head.len-1) as usize));
-    return bitfield;
+    if !bitfield.test() { return None; }
+    return Some(bitfield);
 }
 
-fn parse_request(msg: &mut Vec<u8>) -> Request {
+fn parse_request(msg: &mut Vec<u8>) -> Option<Request> {
     let mut req: Request = Default::default();
-    req.head = parse_header(msg);
+    if msg.len() < 17 { return None; }
+    req.head = match parse_header(msg) {
+        Some(h) => h,
+        None => return None,
+    };
     req.index = parse_u32(msg);
     req.offset = parse_u32(msg);
     req.plen = parse_u32(msg);
-    return req;
+    if !req.test() { return None; }
+    return Some(req);
 }
 
-fn parse_piece(msg: &mut Vec<u8>) -> Piece {
+fn parse_piece(msg: &mut Vec<u8>) -> Option<Piece> {
     let mut piece: Piece = Default::default();
-    piece.head = parse_header(msg);
+    piece.head = match parse_header(msg) {
+        Some(h) => h,
+        None => return None,
+    };
     piece.index = parse_u32(msg);
     piece.offset = parse_u32(msg);
+    if msg.len() < (piece.head.len-9) as usize { return None; }
     piece.data.append(&mut msg[0..((piece.head.len-9) as usize)].to_vec());
     let mut copy = msg[((piece.head.len-9) as usize)..msg.len()].to_vec();
     msg.clear();
     msg.append(&mut copy);
-    return piece;
+    if !piece.test() { return None; }
+    return Some(piece);
 }
 
-fn parse_cancel(msg: &mut Vec<u8>) -> Cancel {
+fn parse_cancel(msg: &mut Vec<u8>) -> Option<Cancel> {
     let mut cancel: Cancel = Default::default();
-    cancel.head = parse_header(msg);
+    cancel.head = match parse_header(msg) {
+        Some(h) => h,
+        None => return None,
+    };
+    if msg.len() < 12 { return None; }
     cancel.index = parse_u32(msg);
     cancel.offset = parse_u32(msg);
     cancel.plen = parse_u32(msg);
-    return cancel;
+    if !cancel.test() { return None; }
+    return Some(cancel);
 }
 
 fn is_zero(msg: &Vec<u8>) -> bool {
@@ -138,7 +168,7 @@ fn is_zero(msg: &Vec<u8>) -> bool {
 }
 
 fn parse_msg(msg: &mut Vec<u8>) -> Vec<Message> {
-    let mut list = Vec::<Message>::new();
+    let mut list: Vec<Message> = vec![];
     loop {
         if is_zero(msg) { break }
         let _byte = match msg.get(0) {
@@ -150,20 +180,101 @@ fn parse_msg(msg: &mut Vec<u8>) -> Vec<Message> {
             None => break,
         };
         match byte {
-            CHOKE => list.push(Message::Choke(parse_header(msg))),
-            UNCHOKE => list.push(Message::Unchoke(parse_header(msg))),
-            INTEREST => list.push(Message::Interest(parse_header(msg))),
-            UNINTEREST => list.push(Message::Uninterest(parse_header(msg))),
-            HAVE => list.push(Message::Have(parse_have(msg))),
-            BITFIELD => list.push(Message::Bitfield(parse_bitfield(msg))),
-            REQUEST => list.push(Message::Request(parse_request(msg))),
-            PIECE => list.push(Message::Piece(parse_piece(msg))),
-            CANCEL => list.push(Message::Cancel(parse_cancel(msg))),
-            HANDSHAKE => list.push(Message::Handshake(parse_handshake(msg))),
-            _ => unreachable!("parse_msg"),
+            CHOKE => list.push(Message::Choke(parse_header(msg).unwrap())),
+            UNCHOKE => list.push(Message::Unchoke(parse_header(msg).unwrap())),
+            INTEREST => list.push(Message::Interest(parse_header(msg).unwrap())),
+            UNINTEREST => list.push(Message::Uninterest(parse_header(msg).unwrap())),
+            HAVE => list.push(Message::Have(parse_have(msg).unwrap())),
+            BITFIELD => list.push(Message::Bitfield(parse_bitfield(msg).unwrap())),
+            REQUEST => list.push(Message::Request(parse_request(msg).unwrap())),
+            PIECE => list.push(Message::Piece(parse_piece(msg).unwrap())),
+            CANCEL => list.push(Message::Cancel(parse_cancel(msg).unwrap())),
+            HANDSHAKE => list.push(Message::Handshake(parse_handshake(msg).unwrap())),
+            _ => {
+                println!("{:?}", msg);
+                unreachable!("parse_msg");
+            },
         }
     }
     return list;
+}
+
+// TODO: change parse fns to return Option<Message>
+// return None if parsing invariants fail
+// test(), bounds check, etc
+// unwrap() in main parser 
+// return false on None on try_parse
+
+// returns false too much
+// and somehow gets a 5 byte vec causing unreachable
+fn try_parse(original: &Vec<u8>) -> bool {
+    let mut msg = original.clone();
+    let mut list: Vec<Message> = vec![];
+    loop {
+        if is_zero(&msg) { break }
+        let _byte = match msg.get(0) {
+            Some(byte) => *byte,
+            None => break,
+        };
+        let byte = match msg.get(4) {
+            Some(byte) => *byte,
+            None => break,
+        };
+        match byte {
+            CHOKE => { 
+                let x = parse_header(&mut msg);
+                if x.is_none() { return false; }
+                list.push(Message::Choke(x.unwrap()));
+            }
+            UNCHOKE => { 
+                let x = parse_header(&mut msg);
+                if x.is_none() { return false; }
+                list.push(Message::Unchoke(x.unwrap()));
+            }
+            INTEREST => { 
+                let x = parse_header(&mut msg);
+                if x.is_none() { return false; }
+                list.push(Message::Interest(x.unwrap()));
+            }
+            UNINTEREST => { 
+                let x = parse_header(&mut msg);
+                if x.is_none() { return false; }
+                list.push(Message::Uninterest(x.unwrap()));
+            }
+            HAVE => { 
+                let x = parse_have(&mut msg);
+                if x.is_none() { return false; }
+                list.push(Message::Have(x.unwrap()));
+            }
+            BITFIELD => { 
+                let x = parse_bitfield(&mut msg);
+                if x.is_none() { return false; }
+                list.push(Message::Bitfield(x.unwrap()));
+            }
+            REQUEST => { 
+                let x = parse_request(&mut msg);
+                if x.is_none() { return false; }
+                list.push(Message::Request(x.unwrap()));
+            }
+            PIECE => { 
+                let x = parse_piece(&mut msg);
+                if x.is_none() { return false; }
+                list.push(Message::Piece(x.unwrap()));
+            }
+            CANCEL => { 
+                let x = parse_cancel(&mut msg);
+                if x.is_none() { return false; }
+                list.push(Message::Cancel(x.unwrap()));
+            }
+            HANDSHAKE => { 
+                let x = parse_handshake(&mut msg);
+                if x.is_none() { return false; }
+                list.push(Message::Handshake(x.unwrap()));
+            }
+            _ => return false,
+        }
+    }
+    return true;
 }
 
 const CHOKE: u8 = 0;
@@ -188,10 +299,23 @@ struct Handshake {
     peer_id: [u8; 20],
 }
 
+impl Handshake {
+    fn test(&self) -> bool {
+        if self.len != 19 { return false; }
+        self.protocol.iter().zip("BitTorrent protocol".as_bytes()).all(|(a,b)| a == b)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 struct Header {
     len: u32,
     byte: u8,
+}
+
+impl Header {
+    fn test(&self) -> bool {
+        return (self.byte > 0 && self.byte <= 8) || self.byte == 0x54;
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -200,10 +324,25 @@ struct Have {
     index: u32,
 }
 
+impl Have {
+    fn test(&self) -> bool {
+        if self.head.len != 5 { return false; }
+        if self.head.byte != HAVE { return false; }
+        return true;
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct Bitfield {
     head: Header,
     data: Vec<u8>,
+}
+
+impl Bitfield {
+    fn test(&self) -> bool {
+        if self.head.byte != BITFIELD { return false; }
+        return self.head.len == (self.data.len()+1) as u32;
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -213,6 +352,13 @@ struct Request {
     offset: u32,
     plen: u32,
 }
+
+impl Request {
+    fn test(&self) -> bool {
+        if self.head.byte != REQUEST { return false; }
+        return self.head.len == 13;
+    }
+}
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct Piece {
     head: Header,
@@ -221,12 +367,26 @@ pub struct Piece {
     data: Vec<u8>,
 }
 
+impl Piece {
+    fn test(&self) -> bool {
+        if self.head.byte != PIECE { return false; }
+        return self.head.len == (self.data.len()+9) as u32;
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct Cancel {
     head: Header,
     index: u32,
     offset: u32,
     plen: u32,
+}
+
+impl Cancel {
+    fn test(&self) -> bool {
+        if self.head.byte != CANCEL { return false; }
+        return self.head.len == 13;
+    }
 }
 
 impl Default for Handshake {
@@ -291,11 +451,17 @@ fn fetch_subpiece(stream: &mut TcpStream, index: u32, offset: u32,
     req.plen = plen.to_be();
     
     let req_u8 = bincode::serialize(&req).unwrap();
+    let mut msg: Vec<u8> = vec![];
     let mut buf: Vec<u8> = vec![0; 32767];
     
     stream.write_all(&req_u8).expect("write error");
     
-    stream.read(&mut buf).expect("read error");
+    loop {
+        let bytes = stream.read(&mut buf).expect("read error");
+        buf.truncate(bytes);
+        msg.extend_from_slice(&buf);
+        if try_parse(&msg) { break }
+    }
     
     let msg = parse_msg(&mut buf);
     let mut piece: Piece = Default::default();
