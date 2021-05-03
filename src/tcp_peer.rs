@@ -191,7 +191,7 @@ fn parse_msg(msg: &mut Vec<u8>) -> Vec<Message> {
             CANCEL => list.push(Message::Cancel(parse_cancel(msg).unwrap())),
             HANDSHAKE => list.push(Message::Handshake(parse_handshake(msg).unwrap())),
             _ => {
-                println!("{:?}", msg);
+                // println!("{:?}", msg);
                 unreachable!("parse_msg");
             },
         }
@@ -208,8 +208,11 @@ fn parse_msg(msg: &mut Vec<u8>) -> Vec<Message> {
 // returns false too much
 // and somehow gets a 5 byte vec causing unreachable
 fn try_parse(original: &Vec<u8>) -> bool {
-    let mut msg = original.clone();
-    let mut list: Vec<Message> = vec![];
+    if original.len() == 0 { return false; }
+    let mut msg: Vec<u8> = vec![];
+    for i in original {
+        msg.push(*i);
+    }
     loop {
         if is_zero(&msg) { break }
         let _byte = match msg.get(0) {
@@ -221,56 +224,16 @@ fn try_parse(original: &Vec<u8>) -> bool {
             None => break,
         };
         match byte {
-            CHOKE => { 
-                let x = parse_header(&mut msg);
-                if x.is_none() { return false; }
-                list.push(Message::Choke(x.unwrap()));
-            }
-            UNCHOKE => { 
-                let x = parse_header(&mut msg);
-                if x.is_none() { return false; }
-                list.push(Message::Unchoke(x.unwrap()));
-            }
-            INTEREST => { 
-                let x = parse_header(&mut msg);
-                if x.is_none() { return false; }
-                list.push(Message::Interest(x.unwrap()));
-            }
-            UNINTEREST => { 
-                let x = parse_header(&mut msg);
-                if x.is_none() { return false; }
-                list.push(Message::Uninterest(x.unwrap()));
-            }
-            HAVE => { 
-                let x = parse_have(&mut msg);
-                if x.is_none() { return false; }
-                list.push(Message::Have(x.unwrap()));
-            }
-            BITFIELD => { 
-                let x = parse_bitfield(&mut msg);
-                if x.is_none() { return false; }
-                list.push(Message::Bitfield(x.unwrap()));
-            }
-            REQUEST => { 
-                let x = parse_request(&mut msg);
-                if x.is_none() { return false; }
-                list.push(Message::Request(x.unwrap()));
-            }
-            PIECE => { 
-                let x = parse_piece(&mut msg);
-                if x.is_none() { return false; }
-                list.push(Message::Piece(x.unwrap()));
-            }
-            CANCEL => { 
-                let x = parse_cancel(&mut msg);
-                if x.is_none() { return false; }
-                list.push(Message::Cancel(x.unwrap()));
-            }
-            HANDSHAKE => { 
-                let x = parse_handshake(&mut msg);
-                if x.is_none() { return false; }
-                list.push(Message::Handshake(x.unwrap()));
-            }
+            CHOKE => if parse_header(&mut msg).is_none() { return false; }
+            UNCHOKE => if parse_header(&mut msg).is_none() { return false; }
+            INTEREST => if parse_header(&mut msg).is_none() { return false; }
+            UNINTEREST => if parse_header(&mut msg).is_none() { return false; }
+            HAVE => if parse_have(&mut msg).is_none() { return false; },
+            BITFIELD => if parse_bitfield(&mut msg).is_none() { return false; }
+            REQUEST => if parse_request(&mut msg).is_none() { return false; }
+            PIECE => if parse_piece(&mut msg).is_none() { return false; }
+            CANCEL => if parse_cancel(&mut msg).is_none() { return false; }
+            HANDSHAKE => if parse_handshake(&mut msg).is_none() { return false; }
             _ => return false,
         }
     }
@@ -314,7 +277,7 @@ struct Header {
 
 impl Header {
     fn test(&self) -> bool {
-        return (self.byte > 0 && self.byte <= 8) || self.byte == 0x54;
+        return (self.byte >= CHOKE && self.byte <= CANCEL) || self.byte == HANDSHAKE;
     }
 }
 
@@ -427,6 +390,7 @@ impl ByteField {
     }
 }
 
+// add Option return value
 pub fn send_handshake(stream: &mut TcpStream, info_hash: [u8; 20], peer_id: [u8; 20]) {
     // make handshake
     let handshake = Handshake { info_hash: info_hash, peer_id: peer_id, ..Default::default() };
@@ -451,35 +415,53 @@ fn fetch_subpiece(stream: &mut TcpStream, index: u32, offset: u32,
     req.plen = plen.to_be();
     
     let req_u8 = bincode::serialize(&req).unwrap();
-    let mut msg: Vec<u8> = vec![];
-    let mut buf: Vec<u8> = vec![0; 32767];
     
     stream.write_all(&req_u8).expect("write error");
-    
+
     loop {
-        let bytes = stream.read(&mut buf).expect("read error");
-        buf.truncate(bytes);
-        msg.extend_from_slice(&buf);
-        if try_parse(&msg) { break }
+        let mut msg: Vec<u8> = vec![];
+        let mut extbuf: Vec<u8> = vec![];
+        loop {
+            let mut buf: Vec<u8> = vec![0; 32767];
+            let bytes = stream.read(&mut buf).expect("read error");
+
+            buf.truncate(bytes);
+            if bytes == 0 { return None; }
+
+            for i in &buf {
+                extbuf.push(*i);
+            }
+
+            // std::thread::sleep(std::time::Duration::from_millis(1000));
+            // println!("{} {} {}", stream.peer_addr().unwrap(), bytes, extbuf.len());
+
+            if try_parse(&extbuf) {
+                // println!("extbuflen {}", extbuf.len());
+                for i in &extbuf {
+                    msg.push(*i);
+                }
+                extbuf.clear();
+                break;
+            }
+        }
+        // println!("msglen {}", msg.len());
+        
+        let parsed = parse_msg(&mut msg);
+        let mut piece: Piece = Default::default();
+        piece.data = Vec::new();
+        
+        for m in parsed {
+            piece = match m {
+                Message::Piece(piece) => piece,
+                _ => continue,
+            };
+            
+            if piece.data.len() == 0 { continue }
+            
+            field.arr[(piece.offset.to_le()/plen) as usize] = 1;
+            return Some(piece);
+        }
     }
-    
-    let msg = parse_msg(&mut buf);
-    let mut piece: Piece = Default::default();
-    piece.data = Vec::new();
-    
-    for m in msg {
-        piece = match m {
-            Message::Piece(piece) => piece,
-            _ => continue,
-        };
-        
-        if piece.data.len() == 0 { continue }
-        
-        field.arr[(piece.offset.to_le()/plen) as usize] = 1;
-        
-        return Some(piece);
-    }
-    return None;
 }
 
 pub fn hash_write_piece(piece: Vec<Piece>, hash: Vec<u8>, 
@@ -524,87 +506,6 @@ pub fn split_hashes(hashes: Vec<u8>) -> Vec<Vec<u8>> {
     return split_hashes;
 }
 
-pub fn get_file(stream: &mut TcpStream, piece_len: usize, num_pieces: usize, file_len: usize,
-                hashes: Vec<Vec<u8>>, file: &Arc<Mutex<File>>) {
-
-    let mut threads: Vec<JoinHandle<()>> = vec![];
-    // make request and piece bytefield
-    let mut req = Request { 
-        head: Header { len: 13u32.to_be(), byte: REQUEST }, index: 0, offset: 0, plen: SUBPIECE_LEN.to_be() 
-    };
-    let num_subpieces = piece_len/SUBPIECE_LEN as usize;
-    let mut piece_field: ByteField = Default::default();
-    piece_field.arr = vec![0; num_pieces-1];
-
-    // get pieces
-    // all except last piece
-    loop {
-        let mut piece: Vec<Piece> = vec![];
-        let p = piece_field.get_empty();
-        if p == None { break }
-        let piece_idx = p.unwrap();
-        
-        req.index = piece_idx as u32;
-        
-        let mut subfield: ByteField = Default::default();
-        subfield.arr = vec![0; num_subpieces];
-
-        // subpieces
-        loop {
-            let sub = subfield.get_empty();
-            if sub == None { break }
-            let sub_idx = sub.unwrap();
-
-            req.offset = (sub_idx as u32)*SUBPIECE_LEN;
-            piece.push(fetch_subpiece(stream, req.index, req.offset, 
-                      SUBPIECE_LEN, &mut subfield).unwrap());
-        }
-        piece.sort_by_key(|x| x.offset);
-        threads.push(
-            hash_write_piece(piece.to_vec(), hashes[piece_idx].to_vec(), file, piece_len));
-        piece_field.arr[piece_idx] = 1;
-    }
-
-    let mut piece: Vec<Piece> = vec![];
-    // last piece
-    let last_remainder: usize = file_len-(num_pieces-1)*piece_len;
-    let num_last_subs: usize = last_remainder/SUBPIECE_LEN as usize;
-    let mut last_subfield: ByteField = Default::default();
-    last_subfield.arr = vec![0; num_last_subs];
-
-    // all except last subpiece
-    req.index = num_pieces as u32 - 1;
-    loop {
-        let sub = last_subfield.get_empty();
-        if sub == None { break }
-        let sub_idx = sub.unwrap();
-        
-        req.offset = (sub_idx as u32)*SUBPIECE_LEN;
-        
-        piece.push(fetch_subpiece(stream, req.index, req.offset, 
-                  SUBPIECE_LEN, &mut last_subfield).unwrap());
-    }
-
-
-    // last subpiece
-    let last_sub_len: usize = last_remainder-(num_last_subs*SUBPIECE_LEN as usize);
-    let mut final_subfield: ByteField = Default::default();
-    
-    req.offset = (num_last_subs as u32)*SUBPIECE_LEN;
-    req.plen = last_sub_len as u32;
-    final_subfield.arr = vec![0; (req.offset/req.plen) as usize + 1];
-
-    piece.push(fetch_subpiece(stream, req.index, req.offset, 
-                   req.plen, &mut final_subfield).unwrap());
-    piece.sort_by_key(|x| x.offset);
-    threads.push(
-        hash_write_piece(piece.to_vec(), hashes[num_pieces-1].to_vec(), file, piece_len));
-    
-    for t in threads {
-        t.join().unwrap();
-    }
-}
-
 pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize, file_len: usize,
                 hashes: &Vec<Vec<u8>>, file: &Arc<Mutex<File>>, field: &Arc<Mutex<ByteField>>) {
 
@@ -644,13 +545,10 @@ pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize, 
             };
 
             req.offset = (sub_idx as u32)*SUBPIECE_LEN;
-            match fetch_subpiece(stream, req.index, req.offset, SUBPIECE_LEN, &mut subfield) {
-                Some(s) => {
-                    subfield.arr[sub_idx] = 1;
-                    piece.push(s);
-                },
-                None => continue,
-            }
+            let subp = fetch_subpiece(stream, req.index, req.offset, 
+                SUBPIECE_LEN, &mut subfield);
+            if subp.is_none() { return; }
+            piece.push(subp.unwrap());
         }
         piece.sort_by_key(|x| x.offset);
         threads.push(
@@ -673,33 +571,25 @@ pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize, 
         
         req.offset = (sub_idx as u32)*SUBPIECE_LEN;
         
-        match fetch_subpiece(stream, req.index, req.offset, SUBPIECE_LEN, &mut last_subfield) {
-            Some(s) => {
-                last_subfield.arr[sub_idx] = 1;
-                piece.push(s);
-            },
-            None => continue,
-        }
+        let subp = fetch_subpiece(stream, req.index, req.offset, 
+            SUBPIECE_LEN, &mut last_subfield);
+        if subp.is_none() { return; }
+        piece.push(subp.unwrap());
     }
 
 
     // last subpiece
-    loop {
-        let last_sub_len: usize = last_remainder-(num_last_subs*SUBPIECE_LEN as usize);
-        let mut final_subfield: ByteField = Default::default();
-        
-        req.offset = (num_last_subs as u32)*SUBPIECE_LEN;
-        req.plen = last_sub_len as u32;
-        final_subfield.arr = vec![0; (req.offset/req.plen) as usize + 1];
+    let last_sub_len: usize = last_remainder-(num_last_subs*SUBPIECE_LEN as usize);
+    let mut final_subfield: ByteField = Default::default();
+    
+    req.offset = (num_last_subs as u32)*SUBPIECE_LEN;
+    req.plen = last_sub_len as u32;
+    final_subfield.arr = vec![0; (req.offset/req.plen) as usize + 1];
 
-        match fetch_subpiece(stream, req.index, req.offset, SUBPIECE_LEN, &mut final_subfield) {
-            Some(s) => {
-                piece.push(s);
-                break
-            },
-            None => continue,
-        }
-    }
+    let subp = fetch_subpiece(stream, req.index, req.offset, 
+        req.plen, &mut final_subfield);
+    if subp.is_none() { return; }
+    piece.push(subp.unwrap());
     piece.sort_by_key(|x| x.offset);
     threads.push(
         hash_write_piece(piece.to_vec(), hashes[num_pieces-1].to_vec(), file, piece_len));

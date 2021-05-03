@@ -39,12 +39,16 @@ fn main() {
 
         let builder = std::thread::Builder::new().name(format!("{:?}", addr.0));
         let handle = builder.spawn(move || {
+            if addr.1 == 25565 { return } // localhost
             let stream = TcpStream::connect(addr);
 
             match stream {
                 Ok(mut stream) => {
-                    println!("connected! {:?}", stream);
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(None).unwrap();
+
                     send_handshake(&mut stream, info_hash, info_hash);
+                    println!("connected! {:?}", stream);
 
                     file_getter(&mut stream, piece_len, num_pieces, file_len, &shashes, &file, &pf);
                     return;
