@@ -106,7 +106,7 @@ pub fn get_info_hash(mut bytes: Vec<u8>) -> [u8; 20] {
 
 #[allow(dead_code)]
 // gets the first UDP tracker addr from bencoded tree
-pub fn get_udp_addr(tree: Vec<Item>) -> SocketAddr {
+pub fn get_udp_addr(tree: Vec<Item>) -> Option<SocketAddr> {
     let dict = tree[0].get_dict();
     let list = dict.get("announce-list".as_bytes()).unwrap().get_list();
     let mut tracker = list[0].get_list()[0].get_str();
@@ -116,15 +116,22 @@ pub fn get_udp_addr(tree: Vec<Item>) -> SocketAddr {
     }
     tracker.drain(0.."udp://".len());
     tracker.truncate(tracker.len()-"/announce".len());
-    return std::str::from_utf8(&tracker).unwrap().to_socket_addrs().unwrap().nth(0).unwrap();
+    let addrs = std::str::from_utf8(&tracker).unwrap().to_socket_addrs().unwrap();
+    for addr in addrs {
+        if addr.is_ipv4() {
+            return Some(addr);
+        }
+    }
+    return None;
 }
 
 #[allow(dead_code)]
 pub fn udp_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Vec<IpPort> {
     // set up udp socket
     let socket = UdpSocket::bind("0.0.0.0:25565").expect("bind error");
-    socket.set_read_timeout(
-        Some(std::time::Duration::new(5, 0))).expect("timeout set error");
+    // socket.set_read_timeout(
+    //     Some(std::time::Duration::new(5, 0))).expect("timeout set error");
+    socket.set_nonblocking(false).unwrap();
 
     // init structs and serialize
     let req = ConnectReq { 

@@ -39,7 +39,11 @@ pub fn http_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Ve
     stream.write_all(&get).unwrap();
     // read it's reply
     let mut buf: Vec<u8> = vec![0; 10000];
-    let len = stream.read(&mut buf).unwrap(); 
+    let len;
+    match stream.read(&mut buf) {
+        Ok(l) => len = l,
+        Err(e) => return Err(e.to_string()),
+    }
     buf.truncate(len);
     // remove http header
     let mut count = 0;
