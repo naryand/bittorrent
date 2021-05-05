@@ -10,13 +10,16 @@ use tcp_peer::*;
 
 use std::{net::{TcpStream, Ipv4Addr}, vec, sync::{Arc, Mutex}, fs::File};
 
+use crate::http_tracker::{get_http_addr, http_announce_tracker};
+
 fn main() {
     // read and parse torrent file
     let bytes: Vec<u8> = std::fs::read("./a.torrent").expect("read error");
     let mut str: Vec<u8> = bytes.clone();
     let tree: Vec<Item> = parse(&mut str);
     let info_hash = get_info_hash(bytes);
-    let peers = udp_announce_tracker(get_udp_addr(tree.clone()), info_hash);
+    let addr = get_http_addr(tree.clone());
+    let peers = http_announce_tracker(addr, info_hash).unwrap();
 
     // get info dict values
     let dict = tree[0].get_dict();

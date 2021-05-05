@@ -1,8 +1,5 @@
-// note: no error handling
 #![allow(dead_code)]
 
-// now comment it
-//
 use crate::udp_tracker::IpPort;
 use crate::bdecoder::{parse, Item};
 
@@ -24,7 +21,7 @@ fn parse_ip_port(bytes: Vec<u8>) -> Vec<IpPort> {
 }
 
 // takes in info_hash and tracker addr, announces and gets peer IpPorts
-pub fn http_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Vec<IpPort> {
+pub fn http_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort>, String> {
     let mut get: Vec<u8> = vec![];
     // prefix
     let mut base: String = "GET /announce?info_hash=".to_string();
@@ -42,13 +39,39 @@ pub fn http_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Vec<IpPor
     stream.write_all(&get).unwrap();
     // read it's reply
     let mut buf: Vec<u8> = vec![0; 10000];
-    stream.read(&mut buf).unwrap(); 
+    let len = stream.read(&mut buf).unwrap(); 
+    buf.truncate(len);
     // remove http header
-    buf.drain(0.."HTTP/1.1 200 OK\r\n\r\n".len());
+    let mut count = 0;
+    for i in buf.windows(4) {
+        count += 1;
+        if i.iter().zip("\r\n\r\n".as_bytes()).all(|(a, b)| *a == *b) { break };
+    }
+    buf.drain(0..count+4);
+    if buf[0] != 'd' as u8 {
+        buf.insert(0, 'd' as u8);
+        buf.push('e' as u8);
+    }
     // parse out ip port and return
     let tree: Vec<Item> = parse(&mut buf);
+    match &tree[0] {
+        Item::Dict(d) => {
+            match d.get("failure reason".as_bytes()) {
+                Some(e) => {
+                    match e {
+                        Item::String(s) => {
+                            return Err(std::str::from_utf8(s).unwrap().to_string());
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                None => {}
+            }
+        }
+        _ => unreachable!(),
+    }
     let peers = tree[0].get_dict().get("peers".as_bytes()).unwrap().get_str();
-    return parse_ip_port(peers)
+    return Ok(parse_ip_port(peers));
 }
 
 // gets the first UDP tracker addr from bencoded tree
