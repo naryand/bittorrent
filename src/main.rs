@@ -2,6 +2,7 @@ mod bdecoder;
 mod bencoder;
 mod udp_tracker;
 mod tcp_peer;
+mod http_tracker;
 
 use bdecoder::*;
 use udp_tracker::*;
