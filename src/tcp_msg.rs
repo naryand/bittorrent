@@ -78,10 +78,7 @@ fn parse_header(msg: &mut Vec<u8>) -> Option<Header> {
 
 fn parse_have(msg: &mut Vec<u8>) -> Option<Have> {
     let mut have: Have = Default::default();
-    have.head = match parse_header(msg) {
-        Some(h) => h,
-        None => return None,
-    };
+    have.head = parse_header(msg)?;
     if msg.len() < 4 { return None; }
     have.index = parse_u32(msg);
     if !have.test() { return None; }
@@ -90,11 +87,9 @@ fn parse_have(msg: &mut Vec<u8>) -> Option<Have> {
 
 fn parse_bitfield(msg: &mut Vec<u8>) -> Option<Bitfield> {
     let mut bitfield: Bitfield = Default::default();
-    bitfield.head = match parse_header(msg) {
-        Some(h) => h,
-        None => return None,
-    };
+    bitfield.head = parse_header(msg)?;
     if msg.len() < (bitfield.head.len-1) as usize { return None; }
+
     for i in 0..((bitfield.head.len-1) as usize) {
         bitfield.data.push(msg[i]);
     } msg.drain(0..((bitfield.head.len-1) as usize));
@@ -105,10 +100,7 @@ fn parse_bitfield(msg: &mut Vec<u8>) -> Option<Bitfield> {
 fn parse_request(msg: &mut Vec<u8>) -> Option<Request> {
     let mut req: Request = Default::default();
     if msg.len() < 17 { return None; }
-    req.head = match parse_header(msg) {
-        Some(h) => h,
-        None => return None,
-    };
+    req.head = parse_header(msg)?;
     req.index = parse_u32(msg);
     req.offset = parse_u32(msg);
     req.plen = parse_u32(msg);
@@ -118,10 +110,7 @@ fn parse_request(msg: &mut Vec<u8>) -> Option<Request> {
 
 fn parse_piece(msg: &mut Vec<u8>) -> Option<Piece> {
     let mut piece: Piece = Default::default();
-    piece.head = match parse_header(msg) {
-        Some(h) => h,
-        None => return None,
-    };
+    piece.head = parse_header(msg)?;
     if msg.len() < (piece.head.len-1) as usize { return None; }
     piece.index = parse_u32(msg);
     piece.offset = parse_u32(msg);
@@ -135,10 +124,7 @@ fn parse_piece(msg: &mut Vec<u8>) -> Option<Piece> {
 
 fn parse_cancel(msg: &mut Vec<u8>) -> Option<Cancel> {
     let mut cancel: Cancel = Default::default();
-    cancel.head = match parse_header(msg) {
-        Some(h) => h,
-        None => return None,
-    };
+    cancel.head = parse_header(msg)?;
     if msg.len() < 12 { return None; }
     cancel.index = parse_u32(msg);
     cancel.offset = parse_u32(msg);
@@ -187,14 +173,6 @@ pub fn parse_msg(msg: &mut Vec<u8>) -> Vec<Message> {
     return list;
 }
 
-// TODO: change parse fns to return Option<Message>
-// return None if parsing invariants fail
-// test(), bounds check, etc
-// unwrap() in main parser 
-// return false on None on try_parse
-
-// returns false too much
-// and somehow gets a 5 byte vec causing unreachable
 pub fn try_parse(original: &Vec<u8>) -> bool {
     if original.len() == 0 { return false; }
     let mut msg: Vec<u8> = vec![];

@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
-use crate::{bdecoder::{parse, Item}, http_tracker::{get_http_addr, http_announce_tracker}, tcp_msg::*, udp_tracker::get_info_hash};
+use crate::{bdecoder::{parse, Item}, http_tracker::{get_http_addr, http_announce_tracker}, 
+            tcp_msg::*, udp_tracker::get_info_hash};
 
-use std::{fs::File, io::{Read, Write}, net::{Ipv4Addr, TcpStream}, path::Path, sync::{Arc, Mutex, Weak, atomic::AtomicBool}, thread::{self, JoinHandle}, usize, vec};
+use std::{collections::BTreeMap, fs::{File, create_dir_all}, io::{Read, Write}, net::{Ipv4Addr, TcpStream}, ops::Deref, path::Path, str::from_utf8, sync::{Arc, Mutex, Weak, atomic::AtomicBool}, thread::{self, JoinHandle}, usize, vec};
 
 #[cfg(target_family="windows")]
 use std::os::windows::prelude::*;
@@ -49,10 +50,8 @@ pub fn send_handshake(stream: &mut TcpStream, info_hash: [u8; 20], peer_id: [u8;
     handshake_u8.append(&mut bincode::serialize(&interest).unwrap());
     stream.write_all(&handshake_u8).expect("handshake write error");
     let mut buf: Vec<u8> = vec![0; 8192];
-    match stream.read(&mut buf) {
-        Ok(_) => return Some(()),
-        Err(_) => return None,
-    }
+    stream.read(&mut buf).ok()?;
+    return Some(());
 }
 
 fn fetch_subpiece(stream: &mut TcpStream, index: u32, offset: u32, 
@@ -67,21 +66,14 @@ fn fetch_subpiece(stream: &mut TcpStream, index: u32, offset: u32,
     
     let req_u8 = bincode::serialize(&req).unwrap();
     
-    match stream.write_all(&req_u8) {
-        Ok(_) => {}
-        Err(_) => return None,
-    }
+    stream.write_all(&req_u8).ok()?;
 
     loop {
         let mut msg: Vec<u8> = vec![];
         let mut extbuf: Vec<u8> = vec![];
         loop {
             let mut buf: Vec<u8> = vec![0; 32767];
-            let bytes; 
-            match stream.read(&mut buf) {
-                Ok(b) => bytes = b,
-                Err(_) => return None,
-            }
+            let bytes = stream.read(&mut buf).ok()?;
 
             buf.truncate(bytes);
             if bytes == 0 { return None; }
@@ -90,11 +82,7 @@ fn fetch_subpiece(stream: &mut TcpStream, index: u32, offset: u32,
                 extbuf.push(*i);
             }
 
-            // std::thread::sleep(std::time::Duration::from_millis(1000));
-            // println!("{} {} {}", stream.peer_addr().unwrap(), bytes, extbuf.len());
-
             if try_parse(&extbuf) {
-                // println!("extbuflen {}", extbuf.len());
                 for i in &extbuf {
                     msg.push(*i);
                 }
@@ -102,7 +90,6 @@ fn fetch_subpiece(stream: &mut TcpStream, index: u32, offset: u32,
                 break;
             }
         }
-        // println!("msglen {}", msg.len());
         
         let parsed = parse_msg(&mut msg);
         let mut piece: Piece = Default::default();
@@ -122,14 +109,53 @@ fn fetch_subpiece(stream: &mut TcpStream, index: u32, offset: u32,
     }
 }
 
-pub fn hash_write_piece(piece: Vec<Piece>, hash: Vec<u8>, 
-                        file: &Arc<Mutex<File>>, piece_len: usize) -> JoinHandle<Option<()>> {
+fn write_piece(piece: &Piece, piece_len: usize, files: &Arc<Vec<FileSize>>) {
+    let mut start = (piece.index.to_le() as usize*piece_len)+piece.offset.to_le() as usize;
+    let mut end = start+piece.data.len();
+    let mut next_file = 0u64;
+
+    for filesize in files.deref() {
+        if start > filesize.len && next_file == 0 { 
+            start -= filesize.len;
+            end -= filesize.len;
+            continue;
+        }
+
+        if next_file > 0 {
+            { // critical section
+                let f = filesize.file.lock().unwrap();
+                #[cfg(target_family="windows")]
+                f.seek_write(&piece.data[(end-start)..], 0u64).unwrap();
+                #[cfg(target_family="unix")]
+                f.write_all_at(&piece.data[(end-start)..], 0u64).unwrap();
+            }
+            return;
+        } else {
+            if end > filesize.len { next_file = (end-filesize.len) as u64; end = filesize.len; }
+            
+            { // critical section
+                let f = filesize.file.lock().unwrap();
+                #[cfg(target_family="windows")]
+                f.seek_write(&piece.data[0..(end-start)], start as u64).unwrap();
+                #[cfg(target_family="unix")]
+                f.write_all_at(&piece.data[0..(end-start)], start as u64).unwrap();
+            }
+            if next_file == 0 { return; }
+        }
+    }
+}
+
+fn hash_write_piece(piece: Vec<Piece>, hash: Vec<u8>, field: &Arc<Mutex<ByteField>>,
+                        files: &Arc<Vec<FileSize>>, piece_len: usize) -> JoinHandle<()> {
+
+    let index = piece[0].index as usize;
     let mut flat_piece: Vec<u8> = vec![];
     for s in piece.iter() {
         flat_piece.extend_from_slice(&s.data); // assumes ordered by offset
     }
 
-    let f = Arc::clone(file);
+    let piece_field = Arc::clone(field);
+    let dests = Arc::clone(files);
 
     let handle = thread::spawn(move || {
         let mut hasher = Sha1::new();
@@ -137,21 +163,20 @@ pub fn hash_write_piece(piece: Vec<Piece>, hash: Vec<u8>,
         let piece_hash = hasher.finalize().to_vec();
 
         if piece_hash.iter().zip(&hash).filter(|&(a, b)| a == b).count() != 20 {
-            return None;
+            { // critical section
+                let mut pf = piece_field.lock().unwrap();
+                pf.arr[index] = (EMPTY, None);
+            }
+            return;
         }
 
-        for s in piece.iter() {
-            let offset = (s.index.to_le() as usize*piece_len)+s.offset.to_le() as usize;
-            // critical section
-            { 
-                let file = f.lock().unwrap();
-                #[cfg(target_family="windows")]
-                file.seek_write(&s.data, offset as u64).expect("file write error");
-                #[cfg(target_family="unix")]
-                file.write_all_at(&s.data, offset as u64).expect("file write error");
-            }
+        for s in &piece {
+            write_piece(s, piece_len, &dests);
         }
-        return Some(());
+        { // critical section
+            let mut pf = piece_field.lock().unwrap();
+            pf.arr[index] = (COMPLETE, None);
+        }
     });
     return handle;
 }
@@ -166,24 +191,22 @@ pub fn split_hashes(hashes: Vec<u8>) -> Vec<Vec<u8>> {
 }
 
 pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize, 
-                   file_len: usize, hashes: &Vec<Vec<u8>>, file: &Arc<Mutex<File>>, 
+                   file_len: usize, hashes: &Vec<Vec<u8>>, files: &Arc<Vec<FileSize>>, 
                    field: &Arc<Mutex<ByteField>>, alive: &Arc<AtomicBool>) {
 
-    let mut threads: Vec<JoinHandle<Option<()>>> = vec![];
+    let mut threads: Vec<JoinHandle<()>> = vec![];
+
     // make request and piece bytefield
     let mut req = Request { 
         head: Header { len: 13u32.to_be(), byte: REQUEST }, index: 0, offset: 0, plen: SUBPIECE_LEN.to_be() 
     };
     let num_subpieces = piece_len/SUBPIECE_LEN as usize;
-
     let piece_field = field.clone();
 
-    // indices this thread downloaded
-    let mut indices: Vec<usize> = vec![];
 
     // get pieces
-    // all except last piece
     loop {
+        // pick a piece
         let mut piece: Vec<Piece> = vec![];
         let piece_idx;
         { // critical section
@@ -192,16 +215,13 @@ pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize,
                 Some(p) => p,
                 None => break
             };
-            pf.arr[piece_idx].0 = IN_PROGRESS;
-            pf.arr[piece_idx].1 = Some(Arc::downgrade(alive));
+            pf.arr[piece_idx] = (IN_PROGRESS, Some(Arc::downgrade(alive)));
         }
-        indices.push(piece_idx);
 
+        // all except last piece
         if piece_idx != num_pieces-1 {
             req.index = piece_idx as u32;
-            
-            let mut subfield: ByteField = Default::default();
-            subfield.arr = vec![(0, None); num_subpieces];
+            let mut subfield = ByteField { arr: vec![(0, None); num_subpieces] };
 
             // subpieces
             loop {
@@ -212,25 +232,21 @@ pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize,
 
                 req.offset = (sub_idx as u32)*SUBPIECE_LEN;
                 let subp = fetch_subpiece(stream, req.index, req.offset, 
-                    SUBPIECE_LEN, &mut subfield);
-                if subp.is_none() { return; }
+                                                       SUBPIECE_LEN, &mut subfield);
+
+                if subp.is_none() { for t in threads { t.join().unwrap(); } return; }
                 piece.push(subp.unwrap());
             }
             piece.sort_by_key(|x| x.offset);
             threads.push(
                 hash_write_piece(
-                    piece.to_vec(), hashes[piece_idx].to_vec(), file, piece_len));
-            { // critical section
-                let mut pf = piece_field.lock().unwrap();
-                pf.arr[piece_idx] = (COMPLETE, None);
-            }
+                    piece.to_vec(), hashes[piece_idx].to_vec(), field, files, piece_len));
         } else {
             let mut piece: Vec<Piece> = vec![];
             // last piece
             let last_remainder: usize = file_len-(num_pieces-1)*piece_len;
             let num_last_subs: usize = last_remainder/SUBPIECE_LEN as usize;
-            let mut last_subfield: ByteField = Default::default();
-            last_subfield.arr = vec![(0, None); num_last_subs];
+            let mut last_subfield= ByteField { arr: vec![(0, None); num_last_subs] };
 
             // all except last subpiece
             req.index = num_pieces as u32 - 1;
@@ -242,55 +258,105 @@ pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize,
                 req.offset = (sub_idx as u32)*SUBPIECE_LEN;
                 
                 let subp = fetch_subpiece(stream, req.index, req.offset, 
-                    SUBPIECE_LEN, &mut last_subfield);
-                if subp.is_none() { return; }
+                                                       SUBPIECE_LEN, &mut last_subfield);
+
+                if subp.is_none() { for t in threads { t.join().unwrap(); } return; }
                 piece.push(subp.unwrap());
             }
 
-
             // last subpiece
             let last_sub_len: usize = last_remainder-(num_last_subs*SUBPIECE_LEN as usize);
-            let mut final_subfield: ByteField = Default::default();
-            
             req.offset = (num_last_subs as u32)*SUBPIECE_LEN;
             req.plen = last_sub_len as u32;
-            final_subfield.arr = vec![(0, None); (req.offset/req.plen) as usize + 1];
+            let mut final_subfield = ByteField { 
+                arr: vec![(0, None); (req.offset/req.plen) as usize + 1] 
+            };
 
             let subp = fetch_subpiece(stream, req.index, req.offset, 
-                req.plen, &mut final_subfield);
-            if subp.is_none() { return; }
+                                                  req.plen, &mut final_subfield);
+
+            if subp.is_none() { for t in threads { t.join().unwrap(); } return; }
             piece.push(subp.unwrap());
+
             piece.sort_by_key(|x| x.offset);
             threads.push(
-                hash_write_piece(
-                    piece.to_vec(), hashes[num_pieces-1].to_vec(), file, piece_len));
-            { // critical section
-                let mut pf = piece_field.lock().unwrap();
-                pf.arr[piece_idx] = (COMPLETE, None);
-            }
+                hash_write_piece(piece.to_vec(), hashes[num_pieces-1].to_vec(), 
+                                 field, files, piece_len));
         }
     }
-    
-    for t in threads {
-        match t.join().unwrap() {
-            Some(()) => continue,
-            None => { // if any hashes didn't match
-                { // critical section
-                    let mut pf = piece_field.lock().unwrap();
-                    // discard all indices
-                    for i in &indices {
-                        pf.arr[*i] = (EMPTY, None);
-                    }
-                    return;
+    for t in threads { t.join().unwrap(); }
+}
+
+pub struct FileSize {
+    file: Arc<Mutex<File>>,
+    len: usize,
+}
+
+fn parse_file(info: BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, usize) {
+    match info.get("length".as_bytes()) {
+        // single file
+        Some(s) => {
+            // file length
+            let file_len = s.get_int() as usize;
+            // name of the file
+            let filename = info.get("name".as_bytes()).unwrap().get_str();
+            // create file and return
+            let path = Path::new(std::str::from_utf8(&filename).unwrap());
+            let dest = Arc::new(Mutex::new(File::create(path).unwrap()));
+            let file_size = FileSize { file: dest, len: file_len };
+            return (Arc::new(vec![file_size]), file_len);
+        }
+        // multifile
+        None => {
+            // get parent folder name and file dicts
+            let name = info.get("name".as_bytes()).unwrap().get_str();
+            let files = info.get("files".as_bytes()).unwrap().get_list();
+            let mut ret: Vec<FileSize> = vec![];
+            // for each dict
+            for f in files {
+                let dict = f.get_dict();
+                // get length
+                let length = dict.get("length".as_bytes()).unwrap().get_int() as usize;
+                // parse out path
+                let mut path_list = dict.get("path".as_bytes()).unwrap().get_list();
+                // end filename
+                let end_file = path_list.pop().unwrap().get_str();
+                let filename = from_utf8(&end_file).unwrap();
+                // parent folders to the filename
+                let mut base = "./".to_string() + from_utf8(&name).unwrap();
+                for folder in path_list {
+                    let folder_name = "/".to_string() + from_utf8(&folder.get_str()).unwrap();
+                    base.push_str(&folder_name);
                 }
+                // create parents and file
+                create_dir_all(base.clone()).unwrap();
+                let full_path = base+"/"+filename;
+                let file_path = Path::new(&full_path);
+                let file = Arc::new(Mutex::new(File::create(file_path).unwrap()));
+                let file_size = FileSize { file: file, len: length };
+                ret.push(file_size);
             }
+
+            // get total length from each file
+            let mut total_len = 0usize;
+            for filesize in &ret {
+                total_len += filesize.len;
+            }
+
+            return (Arc::new(ret), total_len);
         }
     }
 }
 
 pub fn tcp_download_pieces(p: &Path) {
     // read and parse torrent file
-    let bytes: Vec<u8> = std::fs::read(p).expect("read error");
+    let bytes: Vec<u8> = match std::fs::read(p) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{} {:?}", e, p);
+            return;
+        }
+    };
     let mut str: Vec<u8> = bytes.clone();
     let tree: Vec<Item> = parse(&mut str);
     let info_hash = get_info_hash(bytes);
@@ -301,13 +367,10 @@ pub fn tcp_download_pieces(p: &Path) {
     let info = dict.get("info".as_bytes()).unwrap().get_dict();
     let piece_len = info.get("piece length".as_bytes()).unwrap().get_int() as usize;
     let num_pieces = (info.get("pieces".as_bytes()).unwrap().get_str().len()/20) as usize;
-    let file_len = info.get("length".as_bytes()).unwrap().get_int() as usize;
     let hashes = info.get("pieces".as_bytes()).unwrap().get_str();
-    let filename = info.get("name".as_bytes()).unwrap().get_str();
     let split_hashes = Arc::new(split_hashes(hashes));
-
-    let path = Path::new(std::str::from_utf8(&filename).unwrap());
-    let dest = Arc::new(Mutex::new(File::create(path).unwrap()));
+    
+    let (files, file_len) = parse_file(info);
     let field: Arc<Mutex<ByteField>> = Arc::new(
         Mutex::new(ByteField { arr: vec![(EMPTY, None); num_pieces]}));
 
@@ -331,7 +394,7 @@ pub fn tcp_download_pieces(p: &Path) {
                 if pf.arr[i].0 == IN_PROGRESS {
                     // if alive was dropped
                     if Weak::upgrade(pf.arr[i].1.as_ref().unwrap()).is_none() {
-                        pf.arr[i].0 = EMPTY;
+                        pf.arr[i] = (EMPTY, None);
                         indices_avail = true;
                     }
                 } else if pf.arr[i].0 == EMPTY {
@@ -356,8 +419,8 @@ pub fn tcp_download_pieces(p: &Path) {
             for peer in peers {
                 let addr = (Ipv4Addr::from(peer.ip), peer.port);
                 let shashes = split_hashes.clone();
-                let file = dest.clone();
                 let pf = field.clone();
+                let dests = Arc::clone(&files);
 
                 let builder = std::thread::Builder::new().name(format!("{:?}", addr.0));
                 let handle = builder.spawn(move || {
@@ -370,15 +433,15 @@ pub fn tcp_download_pieces(p: &Path) {
                     match stream {
                         Ok(mut stream) => {
                             stream.set_nonblocking(false).unwrap();
-                            stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+                            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
 
                             match send_handshake(&mut stream, info_hash, info_hash) {
-                                Some(_) => {},
-                                None => return,
+                                 Some(_) => {}
+                                 None => return,
                             }
 
                             file_getter(&mut stream, piece_len, num_pieces, file_len, 
-                                        &shashes, &file, &pf, &alive);
+                                        &shashes, &dests, &pf, &alive);
                             return;
                         }
                         Err(_) => return,
@@ -391,7 +454,7 @@ pub fn tcp_download_pieces(p: &Path) {
         count += 1;
         std::thread::sleep(std::time::Duration::from_secs(LOOP_SLEEP));
     }
-
+    
     for t in threads {
         match t.join() {
             _ => {}
