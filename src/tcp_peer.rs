@@ -1,9 +1,8 @@
 #![allow(dead_code)]
 
-use crate::{bdecoder::{parse, Item}, http_tracker::{get_http_addr, http_announce_tracker}, 
-            tcp_msg::*, udp_tracker::get_info_hash};
+use crate::{bdecoder::*, http_tracker::*, tcp_msg::*, udp_tracker::*};
 
-use std::{collections::BTreeMap, fs::{File, create_dir_all}, io::{Read, Write}, net::{Ipv4Addr, TcpStream}, ops::Deref, path::Path, str::from_utf8, sync::{Arc, Mutex, Weak, atomic::AtomicBool}, thread::{self, JoinHandle}, usize, vec};
+use std::{collections::{BTreeMap, VecDeque}, fs::{File, create_dir_all}, io::{Read, Write}, net::{Ipv4Addr, SocketAddr, TcpStream}, ops::Deref, path::Path, str::from_utf8, sync::{Arc, Condvar, Mutex, Weak, atomic::AtomicBool}, thread::{self, JoinHandle}, time::Duration, usize, vec};
 
 #[cfg(target_family="windows")]
 use std::os::windows::prelude::*;
@@ -145,40 +144,67 @@ fn write_piece(piece: &Piece, piece_len: usize, files: &Arc<Vec<FileSize>>) {
     }
 }
 
-fn hash_write_piece(piece: Vec<Piece>, hash: Vec<u8>, field: &Arc<Mutex<ByteField>>,
-                        files: &Arc<Vec<FileSize>>, piece_len: usize) -> JoinHandle<()> {
+fn spawn_hash_write(field: &Arc<Mutex<ByteField>>, files: &Arc<Vec<FileSize>>, 
+                    piece_len: usize, threads: usize, conn_cond: &Arc<Condvar>) 
+                    -> (Arc<Mutex<VecDeque<(Vec<Piece>, Vec<u8>)>>>, 
+                        Arc<Condvar>, Vec<JoinHandle<()>>, Arc<AtomicBool>) {
 
-    let index = piece[0].index as usize;
-    let mut flat_piece: Vec<u8> = vec![];
-    for s in piece.iter() {
-        flat_piece.extend_from_slice(&s.data); // assumes ordered by offset
-    }
+    let queue: Arc<Mutex<VecDeque<(Vec<Piece>, Vec<u8>)>>> = Arc::new(Mutex::new(VecDeque::new()));
+    let cond = Arc::new(Condvar::new());
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut handles = vec![];
 
-    let piece_field = Arc::clone(field);
-    let dests = Arc::clone(files);
+    for _ in 0..threads {
+        let q = Arc::clone(&queue);
+        let c = Arc::clone(&cond);
+        let piece_field = Arc::clone(&field);
+        let dests = Arc::clone(&files);
+        let breakloop = Arc::clone(&flag);
+        let ccond = Arc::clone(conn_cond);
 
-    let handle = thread::spawn(move || {
-        let mut hasher = Sha1::new();
-        hasher.update(flat_piece);
-        let piece_hash = hasher.finalize().to_vec();
+        let handle = thread::spawn(move || {
+            loop {
+                let tuple;
+                { // critical section
+                    let mut guard = c.wait(q.lock().unwrap()).unwrap();
+                    if breakloop.load(std::sync::atomic::Ordering::Relaxed) { break }
+                    tuple = guard.pop_front().unwrap();
+                }
+                let (piece, hash) = tuple;
 
-        if piece_hash.iter().zip(&hash).filter(|&(a, b)| a == b).count() != 20 {
-            { // critical section
-                let mut pf = piece_field.lock().unwrap();
-                pf.arr[index] = (EMPTY, None);
+                let index = piece[0].index as usize;
+                let mut flat_piece: Vec<u8> = vec![];
+                for s in piece.iter() {
+                    flat_piece.extend_from_slice(&s.data); // assumes ordered by offset
+                }
+
+                let mut hasher = Sha1::new();
+                hasher.update(flat_piece);
+                let piece_hash = hasher.finalize().to_vec();
+
+                if piece_hash.iter().zip(&hash).filter(|&(a, b)| *a == *b).count() != 20 {
+                    { // critical section
+                        // unreserve piece
+                        let mut pf = piece_field.lock().unwrap();
+                        pf.arr[index] = (EMPTY, None);
+                        // notify waiting connections
+                        ccond.notify_one();
+                    }
+                    continue;
+                }
+
+                for s in &piece {
+                    write_piece(s, piece_len, &dests);
+                }
+                { // critical section
+                    let mut pf = piece_field.lock().unwrap();
+                    pf.arr[index] = (COMPLETE, None);
+                }
             }
-            return;
-        }
-
-        for s in &piece {
-            write_piece(s, piece_len, &dests);
-        }
-        { // critical section
-            let mut pf = piece_field.lock().unwrap();
-            pf.arr[index] = (COMPLETE, None);
-        }
-    });
-    return handle;
+        });
+        handles.push(handle);
+    }
+    return (queue, cond, handles, flag);
 }
 
 pub fn split_hashes(hashes: Vec<u8>) -> Vec<Vec<u8>> {
@@ -190,19 +216,21 @@ pub fn split_hashes(hashes: Vec<u8>) -> Vec<Vec<u8>> {
     return split_hashes;
 }
 
-pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize, 
-                   file_len: usize, hashes: &Vec<Vec<u8>>, files: &Arc<Vec<FileSize>>, 
-                   field: &Arc<Mutex<ByteField>>, alive: &Arc<AtomicBool>) {
-
-    let mut threads: Vec<JoinHandle<()>> = vec![];
+pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize, file_len: usize, 
+                   hashes: &Vec<Vec<u8>>, field: &Arc<Mutex<ByteField>>, alive: &Arc<AtomicBool>, 
+                   queue: &Arc<Mutex<VecDeque<(Vec<Piece>, Vec<u8>)>>>, hash_cond: &Arc<Condvar>,
+                   conn_cond: &Arc<Condvar>, break_conns: &Arc<AtomicBool>) {
 
     // make request and piece bytefield
     let mut req = Request { 
         head: Header { len: 13u32.to_be(), byte: REQUEST }, index: 0, offset: 0, plen: SUBPIECE_LEN.to_be() 
     };
     let num_subpieces = piece_len/SUBPIECE_LEN as usize;
-    let piece_field = field.clone();
-
+    let piece_field = Arc::clone(field);
+    let q = Arc::clone(queue);
+    let hcond = Arc::clone(hash_cond);
+    let ccond = Arc::clone(conn_cond);
+    let bcon = Arc::clone(break_conns);
 
     // get pieces
     loop {
@@ -210,10 +238,17 @@ pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize,
         let mut piece: Vec<Piece> = vec![];
         let piece_idx;
         { // critical section
-            let mut pf = piece_field.lock().unwrap();
+            let mut pf = ccond.wait_while(piece_field.lock().unwrap(), 
+            |pf| {
+                if bcon.load(std::sync::atomic::Ordering::Relaxed) { return false; }
+                match pf.get_empty() {
+                    Some(_) => return false,
+                    None => return true,
+                }
+            }).unwrap();
             piece_idx = match pf.get_empty() {
                 Some(p) => p,
-                None => break
+                None => return,
             };
             pf.arr[piece_idx] = (IN_PROGRESS, Some(Arc::downgrade(alive)));
         }
@@ -234,19 +269,21 @@ pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize,
                 let subp = fetch_subpiece(stream, req.index, req.offset, 
                                                        SUBPIECE_LEN, &mut subfield);
 
-                if subp.is_none() { for t in threads { t.join().unwrap(); } return; }
+                if subp.is_none() { return; }
                 piece.push(subp.unwrap());
             }
             piece.sort_by_key(|x| x.offset);
-            threads.push(
-                hash_write_piece(
-                    piece.to_vec(), hashes[piece_idx].to_vec(), field, files, piece_len));
+            { // critical section
+                let mut queue = q.lock().unwrap();
+                queue.push_back((piece, hashes[piece_idx].to_vec()));
+                hcond.notify_one();
+            }
         } else {
             let mut piece: Vec<Piece> = vec![];
             // last piece
             let last_remainder: usize = file_len-(num_pieces-1)*piece_len;
             let num_last_subs: usize = last_remainder/SUBPIECE_LEN as usize;
-            let mut last_subfield= ByteField { arr: vec![(0, None); num_last_subs] };
+            let mut last_subfield = ByteField { arr: vec![(0, None); num_last_subs] };
 
             // all except last subpiece
             req.index = num_pieces as u32 - 1;
@@ -260,7 +297,7 @@ pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize,
                 let subp = fetch_subpiece(stream, req.index, req.offset, 
                                                        SUBPIECE_LEN, &mut last_subfield);
 
-                if subp.is_none() { for t in threads { t.join().unwrap(); } return; }
+                if subp.is_none() { return; }
                 piece.push(subp.unwrap());
             }
 
@@ -275,16 +312,17 @@ pub fn file_getter(stream: &mut TcpStream, piece_len: usize, num_pieces: usize,
             let subp = fetch_subpiece(stream, req.index, req.offset, 
                                                   req.plen, &mut final_subfield);
 
-            if subp.is_none() { for t in threads { t.join().unwrap(); } return; }
+            if subp.is_none() { return; }
             piece.push(subp.unwrap());
 
             piece.sort_by_key(|x| x.offset);
-            threads.push(
-                hash_write_piece(piece.to_vec(), hashes[num_pieces-1].to_vec(), 
-                                 field, files, piece_len));
+            { // critical section
+                let mut queue = q.lock().unwrap();
+                queue.push_back((piece, hashes[num_pieces-1].to_vec()));
+                hcond.notify_one();
+            }
         }
     }
-    for t in threads { t.join().unwrap(); }
 }
 
 pub struct FileSize {
@@ -374,11 +412,22 @@ pub fn tcp_download_pieces(p: &Path) {
     let field: Arc<Mutex<ByteField>> = Arc::new(
         Mutex::new(ByteField { arr: vec![(EMPTY, None); num_pieces]}));
 
+    // connection break and notifier
+    let conn_cond = Arc::new(Condvar::new());
+    let break_conns = Arc::new(AtomicBool::new(false));
+
+    // spawn hashing threads
+    let (queue, cond, 
+         mut handles, breakloops) = 
+         spawn_hash_write(&field, &files, piece_len, 24, &conn_cond);
+    
+
     let mut threads = vec![];
+    threads.append(&mut handles);
     let mut count: usize = 0;
     
-    const LOOP_SLEEP: u64 = 1;
     const ANNOUNCE_INTERVAL: usize = 60/LOOP_SLEEP as usize;
+    const LOOP_SLEEP: u64 = 1;
 
     loop {
         let mut indices_avail = false;
@@ -394,7 +443,9 @@ pub fn tcp_download_pieces(p: &Path) {
                 if pf.arr[i].0 == IN_PROGRESS {
                     // if alive was dropped
                     if Weak::upgrade(pf.arr[i].1.as_ref().unwrap()).is_none() {
+                        // unreserve piece and notify waiting connections
                         pf.arr[i] = (EMPTY, None);
+                        conn_cond.notify_one();
                         indices_avail = true;
                     }
                 } else if pf.arr[i].0 == EMPTY {
@@ -420,7 +471,10 @@ pub fn tcp_download_pieces(p: &Path) {
                 let addr = (Ipv4Addr::from(peer.ip), peer.port);
                 let shashes = split_hashes.clone();
                 let pf = field.clone();
-                let dests = Arc::clone(&files);
+                let que = Arc::clone(&queue);
+                let hash_cond = Arc::clone(&cond);
+                let ccond = Arc::clone(&conn_cond);
+                let bcon = Arc::clone(&break_conns);
 
                 let builder = std::thread::Builder::new().name(format!("{:?}", addr.0));
                 let handle = builder.spawn(move || {
@@ -428,12 +482,14 @@ pub fn tcp_download_pieces(p: &Path) {
                     let alive = Arc::new(AtomicBool::new(true));
 
                     if addr.1 == 25565 { return } // localhost
-                    let stream = TcpStream::connect(addr);
+                    let address = &SocketAddr::new(std::net::IpAddr::V4(addr.0), addr.1);
+                    let timeout = Duration::from_secs(5);
+                    let stream = TcpStream::connect_timeout(address, timeout);
 
                     match stream {
                         Ok(mut stream) => {
                             stream.set_nonblocking(false).unwrap();
-                            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
 
                             match send_handshake(&mut stream, info_hash, info_hash) {
                                  Some(_) => {}
@@ -441,7 +497,8 @@ pub fn tcp_download_pieces(p: &Path) {
                             }
 
                             file_getter(&mut stream, piece_len, num_pieces, file_len, 
-                                        &shashes, &dests, &pf, &alive);
+                                        &shashes, &pf, &alive, &que, &hash_cond, 
+                                        &ccond, &bcon);
                             return;
                         }
                         Err(_) => return,
@@ -455,6 +512,12 @@ pub fn tcp_download_pieces(p: &Path) {
         std::thread::sleep(std::time::Duration::from_secs(LOOP_SLEEP));
     }
     
+    // break hashing and connection loops
+    breakloops.store(true, std::sync::atomic::Ordering::Relaxed);
+    cond.notify_all();
+    break_conns.store(true, std::sync::atomic::Ordering::Relaxed);
+    conn_cond.notify_all();
+
     for t in threads {
         match t.join() {
             _ => {}
