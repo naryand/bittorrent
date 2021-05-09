@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use crate::bdecoder::Item;
 
-use std::{fmt, usize, net::{SocketAddr, ToSocketAddrs, UdpSocket}};
+use std::{fmt, io::Error, net::{SocketAddr, ToSocketAddrs, UdpSocket}, usize};
 
 use rand::random;
 use sha1::{Sha1, Digest};
@@ -126,9 +126,9 @@ pub fn get_udp_addr(tree: Vec<Item>) -> Option<SocketAddr> {
 }
 
 #[allow(dead_code)]
-pub fn udp_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Vec<IpPort> {
+pub fn udp_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort>, Error> {
     // set up udp socket
-    let socket = UdpSocket::bind("0.0.0.0:25565").expect("bind error");
+    let socket = UdpSocket::bind("0.0.0.0:25565")?;
     // socket.set_read_timeout(
     //     Some(std::time::Duration::new(5, 0))).expect("timeout set error");
     socket.set_nonblocking(false).unwrap();
@@ -142,8 +142,8 @@ pub fn udp_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Vec<IpPort
     let mut resp_u8: Vec<u8> = bincode::serialize(&resp).unwrap();
 
     // send connection request and get response
-    socket.send_to(&req_u8, addr).expect("send error");
-    socket.recv_from(&mut resp_u8).expect("recv error");
+    socket.send_to(&req_u8, addr)?;
+    socket.recv_from(&mut resp_u8)?;
 
     // deserialize struct and check tx id
     resp = bincode::deserialize(&resp_u8).unwrap();
@@ -169,10 +169,10 @@ pub fn udp_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Vec<IpPort
     }
 
     // send announce request and get response
-    socket.send_to(&req_u8, addr).expect("send error");
-    socket.recv_from(&mut resp_u8).expect("recv error");
+    socket.send_to(&req_u8, addr)?;
+    socket.recv_from(&mut resp_u8)?;
 
     // deserialize and return peers
     announce_resp = bincode::deserialize(&resp_u8).unwrap();
-    return announce_resp.from_be().ip_port.to_vec();
+    return Ok(announce_resp.from_be().ip_port.to_vec());
 }

@@ -3,7 +3,7 @@
 use crate::udp_tracker::IpPort;
 use crate::bdecoder::{parse, Item};
 
-use std::{io::{Read, Write}, net::{TcpStream, ToSocketAddrs, SocketAddr}};
+use std::{io::{Error, Read, Write}, net::{TcpStream, ToSocketAddrs, SocketAddr}};
 
 // takes in byte string of ip:port pairs and parses them
 fn parse_ip_port(bytes: Vec<u8>) -> Vec<IpPort> {
@@ -79,7 +79,7 @@ pub fn http_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Ve
 }
 
 // gets the first UDP tracker addr from bencoded tree
-pub fn get_http_addr(tree: Vec<Item>) -> SocketAddr {
+pub fn get_http_addr(tree: Vec<Item>) -> Result<SocketAddr, Error> {
     let dict = tree[0].get_dict();
     let list = dict.get("announce-list".as_bytes()).unwrap().get_list();
     let mut tracker = list[0].get_list()[0].get_str();
@@ -89,5 +89,5 @@ pub fn get_http_addr(tree: Vec<Item>) -> SocketAddr {
     }
     tracker.drain(0.."http://".len());
     tracker.truncate(tracker.len()-"/announce".len());
-    return std::str::from_utf8(&tracker).unwrap().to_socket_addrs().unwrap().nth(0).unwrap();
+    return Ok(std::str::from_utf8(&tracker).unwrap().to_socket_addrs().unwrap().nth(0).unwrap());
 }
