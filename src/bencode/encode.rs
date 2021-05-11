@@ -1,7 +1,9 @@
+// functionality for encoding bencode trees
 #![allow(dead_code)]
-use crate::bdecoder::Item;
 
-use std::{str::{from_utf8}, collections::BTreeMap};
+use super::Item;
+
+use std::{collections::BTreeMap, str::from_utf8};
 
 fn encode_int(int: i64) -> Vec<u8> {
     return format!("i{}e", int).as_bytes().to_vec();

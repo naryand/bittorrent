@@ -1,15 +1,20 @@
+// udp tracker functionality
 #![allow(dead_code)]
-use crate::bdecoder::Item;
 
-use std::{fmt, io::Error, net::{SocketAddr, ToSocketAddrs, UdpSocket}, usize};
+use super::IpPort;
+use crate::bencode::Item;
+
+use std::{io::Error, net::{ToSocketAddrs, SocketAddr, UdpSocket}};
 
 use rand::random;
-use sha1::{Sha1, Digest};
 use serde::{Serialize, Deserialize};
 
+// literal magic number used for handshake
 const MAGIC: u64 = 0x41727101980;
+// # of peers to request
 const PEERS: usize = 32;
 
+// structs to be (de)serialized and sent/received
 #[derive(Serialize, Deserialize, Debug)]
 struct ConnectReq {
     protocol_id: u64,
@@ -41,12 +46,6 @@ struct AnnounceReq {
     port: u16,
 }
 
-#[derive(Serialize, Deserialize, Copy, Clone)]
-pub struct IpPort {
-    pub ip: u32,
-    pub port: u16,
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 struct AnnounceResp {
     action: u32,
@@ -76,37 +75,8 @@ impl AnnounceRespExt {
     }
 }
 
-impl fmt::Debug for IpPort {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let one: u64 = (self.ip as u64 & (0xff<<24)) >> 24;
-        let two = (self.ip & (0xff<<16)) >> 16; 
-        let three = (self.ip & (0xff<<8)) >> 8; 
-        let four = (self.ip) & 0xff; 
-        write!(f, "[ip: {}.{}.{}.{}, port: {}]", 
-               one, two, three, four, self.port)
-    }
-}
-
-// computes info_hash from .torrent bytes
-pub fn get_info_hash(mut bytes: Vec<u8>) -> [u8; 20] {
-    let mut len: usize = 0;
-    for c in bytes.windows(7) {
-        len += 1;
-        if c.eq("4:infod".as_bytes()) {
-            break
-        }
-    }
-    bytes.drain(0..len+5);
-    bytes.pop();
-    
-    let mut hasher = Sha1::new();
-    hasher.update(bytes);
-    return hasher.finalize().into();
-}
-
-#[allow(dead_code)]
 // gets the first UDP tracker addr from bencoded tree
-pub fn get_udp_addr(tree: Vec<Item>) -> Option<SocketAddr> {
+pub fn get_addr(tree: Vec<Item>) -> Option<SocketAddr> {
     let dict = tree[0].get_dict();
     let list = dict.get("announce-list".as_bytes()).unwrap().get_list();
     let mut tracker = list[0].get_list()[0].get_str();
@@ -125,8 +95,8 @@ pub fn get_udp_addr(tree: Vec<Item>) -> Option<SocketAddr> {
     return None;
 }
 
-#[allow(dead_code)]
-pub fn udp_announce_tracker(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort>, Error> {
+// announces to udp tracker, gets vector of ip and ports
+pub fn announce(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort>, Error> {
     // set up udp socket
     let socket = UdpSocket::bind("0.0.0.0:25565")?;
     // socket.set_read_timeout(
