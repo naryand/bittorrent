@@ -2,16 +2,16 @@
 #![allow(dead_code)]
 
 use crate::{field::{ByteField, constant::*}, file::{write_subpiece}, 
-            tcp_bt::{msg::structs::Piece}, torrent::Torrent};
+            tcp_bt::{msg::structs::Piece, seed::Connector}, torrent::Torrent};
 
-use std::{collections::VecDeque, sync::{Arc, Condvar, atomic::AtomicBool, Mutex}, thread::JoinHandle};
+use std::{collections::VecDeque, sync::{Arc, Condvar, Mutex, 
+          atomic::{AtomicBool, Ordering}}, thread::JoinHandle};
 
 use sha1::{Digest, Sha1};
 
 // struct for holding relevant variables for hashing threads
 pub struct Hasher {
     pub queue: Mutex<VecDeque<(Vec<Piece>, Vec<u8>)>>,
-    pub conns: Condvar,
     pub empty: Condvar,
     pub loops: Condvar,
     pub brk: AtomicBool,
@@ -21,7 +21,6 @@ impl Hasher {
     pub fn new() -> Self {
         Hasher {
             queue: Mutex::new(VecDeque::new()),
-            conns: Condvar::new(),
             empty: Condvar::new(),
             loops: Condvar::new(),
             brk: AtomicBool::new(false),
@@ -32,14 +31,15 @@ impl Hasher {
 
 // spawns the hashing threads
 pub fn spawn_hash_write(hasher: &Arc<Hasher>, field: &Arc<Mutex<ByteField>>, torrent: &Arc<Torrent>, 
-                        threads: usize) -> Vec<JoinHandle<()>> {
+                        connector: &Arc<Connector>, threads: usize) -> Vec<JoinHandle<()>> {
 
     let mut handles = vec![];
 
     for _ in 0..threads {
-        let hq = Arc::clone(hasher);
+        let hasher = Arc::clone(hasher);
         let piece_field = Arc::clone(&field);
         let torrent = Arc::clone(torrent);
+        let connector  = Arc::clone(connector);
         let files = Arc::clone(&torrent.files);
 
         let handle = std::thread::spawn(move || {
@@ -47,16 +47,18 @@ pub fn spawn_hash_write(hasher: &Arc<Hasher>, field: &Arc<Mutex<ByteField>>, tor
                 let tuple;
                 { // critical section
                     let mut guard = 
-                    hq.loops.wait_while(hq.queue.lock().unwrap(),
+                    hasher.loops.wait_while(hasher.queue.lock().unwrap(),
                     |q| {
-                        return q.is_empty();
+                        return q.is_empty() || hasher.brk.load(Ordering::Relaxed);
                     }).unwrap();
+                    if hasher.brk.load(Ordering::Relaxed) { break }
 
-                    if hq.brk.load(std::sync::atomic::Ordering::Relaxed) { break }
-
-                    tuple = guard.pop_front().unwrap();
+                    tuple = match guard.pop_front() {
+                        Some(t) => t,
+                        None => break,
+                    }
                 }
-                hq.empty.notify_all();
+                hasher.empty.notify_all();
                 let (piece, hash) = tuple;
                 let index = piece[0].index as usize;
                 let mut flat_piece: Vec<u8> = vec![];
@@ -72,9 +74,9 @@ pub fn spawn_hash_write(hasher: &Arc<Hasher>, field: &Arc<Mutex<ByteField>>, tor
                     { // critical section
                         // unreserve piece
                         let mut pf = piece_field.lock().unwrap();
-                        pf.field[index] = (EMPTY, None);
+                        pf.arr[index] = EMPTY;
                         // notify waiting connections
-                        hq.conns.notify_one();
+                        connector.loops.notify_one();
                     }
                     continue;
                 }
@@ -84,7 +86,7 @@ pub fn spawn_hash_write(hasher: &Arc<Hasher>, field: &Arc<Mutex<ByteField>>, tor
                 }
                 { // critical section
                     let mut pf = piece_field.lock().unwrap();
-                    pf.field[index] = (COMPLETE, None);
+                    pf.arr[index] = COMPLETE;
                 }
             }
         });

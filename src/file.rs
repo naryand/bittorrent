@@ -20,7 +20,7 @@ pub struct FileSize {
 
 // writes and maps a subpiece to it's file(s)
 pub fn write_subpiece(piece: &Piece, piece_len: usize, files: &Arc<Vec<FileSize>>) {
-    let mut start = (piece.index.to_le() as usize*piece_len)+piece.offset.to_le() as usize;
+    let mut start = (piece.index as usize*piece_len)+piece.offset as usize;
     let mut end = start+piece.data.len();
     let mut next_file = 0u64;
 

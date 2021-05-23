@@ -9,25 +9,22 @@ pub mod constant {
 
 use self::constant::*;
 
-use std::sync::{Weak, atomic::AtomicBool};
-
 pub struct ByteField {
-    pub field: Vec<(u8, Option<Weak<AtomicBool>>)>,
+    pub arr: Vec<u8>,
 }
 
 impl ByteField {
     // returns true if every index is marked complete
     pub fn is_full(&self) -> bool {
-        let nonfull: usize = self.field.iter().filter(|(x, _y)| *x < 2).count();
+        let nonfull: usize = self.arr.iter().filter(|x| **x < 2).count();
         if nonfull == 0 { return true }
         else { return false }
     }
 
     // returns an index which is marked empty
     pub fn get_empty(&self) -> Option<usize> {
-        if self.is_full() { return None }
-        for i in 0..(self.field.len()) {
-            if self.field[i].0 == EMPTY {
+        for i in 0..self.arr.len() {
+            if self.arr[i] == EMPTY {
                 return Some(i);
             }
         }

@@ -7,7 +7,7 @@ mod file;
 mod hash;
 mod torrent;
 
-use {tcp_bt::peer::download_torrent, torrent::Torrent, bencode::{Item, decode::parse}};
+use {tcp_bt::add_torrent, torrent::Torrent, bencode::{Item, decode::parse}};
 
 use std::sync::Arc;
 
@@ -34,5 +34,5 @@ fn main() {
     // download torrent
     let torrent = Arc::new(Torrent::new(&bytes));
     let tree: Vec<Item> = parse(&mut bytes);
-    download_torrent(&torrent, tree);
+    add_torrent(&torrent, tree);
 }

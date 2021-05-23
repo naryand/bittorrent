@@ -14,9 +14,10 @@ Client for the peer to peer BitTorrent protocol from scratch in Rust.
 - Multithreaded SHA1 hash checking for verifying pieces
 - Downloading single and multi-file torrents
 - Resuming partially complete torrents
+- Seeding requested pieces
 
 ### To do
-- Piece paging and seeding
+- Piece paging
 - Rarest first/Choking/Super seeding algorithms
 - DHT, PEX, NAT traversal for more peers
 - Graphical/Web interface

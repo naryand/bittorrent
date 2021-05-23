@@ -15,7 +15,7 @@ fn encode_str(str: Vec<u8>) -> Vec<u8> {
 
 fn encode_dict(dict: BTreeMap<Vec<u8>, Item>) -> Vec<u8> {
     let mut encdict: Vec<u8> = vec![];
-    encdict.extend_from_slice(&"d".as_bytes());
+    encdict.push(b'd');
     for (key, val) in dict { 
         encdict.extend_from_slice(&encode_str(key));
         match val {
@@ -26,13 +26,13 @@ fn encode_dict(dict: BTreeMap<Vec<u8>, Item>) -> Vec<u8> {
             
         }
     }
-    encdict.extend_from_slice(&"e".as_bytes());
+    encdict.push(b'e');
     return encdict;
 } 
 
 fn encode_list(list: Vec<Item>) -> Vec<u8> {
     let mut enclist: Vec<u8> = vec![];
-    enclist.extend_from_slice("l".as_bytes());
+    enclist.push(b'l');
     for item in list {
         match item {
             Item::Int(int) => enclist.extend_from_slice(&encode_int(int)),
@@ -42,7 +42,7 @@ fn encode_list(list: Vec<Item>) -> Vec<u8> {
             
         }
     }
-    enclist.extend_from_slice(&"e".as_bytes().to_vec());
+    enclist.push(b'e');
     return enclist;
 }
 

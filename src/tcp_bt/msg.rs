@@ -39,7 +39,7 @@ pub mod structs {
 
     impl Default for Handshake {
         fn default() -> Handshake {
-            let name = "BitTorrent protocol".as_bytes();
+            let name = b"BitTorrent protocol";
             let mut p: [u8; 19] = [0; 19];
             p.copy_from_slice(&name[0..19]);
             Handshake {
@@ -55,7 +55,7 @@ pub mod structs {
     impl Handshake {
         fn test(&self) -> bool {
             if self.len != 19 { return false; }
-            self.protocol.iter().zip("BitTorrent protocol".as_bytes()).all(|(a,b)| a == b)
+            self.protocol.iter().zip(b"BitTorrent protocol").all(|(a,b)| a == b)
         }
 
         pub fn parse(msg: &mut Vec<u8>) -> Option<Self> {
