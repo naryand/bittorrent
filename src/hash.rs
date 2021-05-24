@@ -49,7 +49,8 @@ pub fn spawn_hash_write(hasher: &Arc<Hasher>, field: &Arc<Mutex<ByteField>>, tor
                     let mut guard = 
                     hasher.loops.wait_while(hasher.queue.lock().unwrap(),
                     |q| {
-                        return q.is_empty() || hasher.brk.load(Ordering::Relaxed);
+                        if hasher.brk.load(Ordering::Relaxed) { return false; }
+                        return q.is_empty();
                     }).unwrap();
                     if hasher.brk.load(Ordering::Relaxed) { break }
 

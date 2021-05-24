@@ -11,6 +11,8 @@ use {tcp_bt::add_torrent, torrent::Torrent, bencode::{Item, decode::parse}};
 
 use std::sync::Arc;
 
+const LISTENING_PORT: u16 = 25566;
+
 fn main() {
     // get arguments
     let args = std::env::args().collect::<Vec<String>>();

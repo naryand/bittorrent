@@ -108,6 +108,12 @@ pub mod structs {
             return Some(head);
         }
         
+        pub fn as_bytes(&self) -> Vec<u8> {
+            let mut bytes = vec![];
+            bytes.append(&mut u32::to_ne_bytes(self.len).to_vec());
+            bytes.push(self.byte);
+            return bytes;
+        }
     }
 
     #[derive(Serialize, Deserialize, Debug, Default)]
@@ -209,6 +215,15 @@ pub mod structs {
             msg.append(&mut copy);
             if !piece.test() { return None; }
             return Some(piece);
+        }
+
+        pub fn as_bytes(&self) -> Vec<u8> {
+            let mut bytes = vec![];
+            bytes.append(&mut self.head.as_bytes());
+            bytes.append(&mut u32::to_ne_bytes(self.index).to_vec());
+            bytes.append(&mut u32::to_ne_bytes(self.offset).to_vec());
+            bytes.extend_from_slice(&self.data);
+            return bytes;
         }
     }
 

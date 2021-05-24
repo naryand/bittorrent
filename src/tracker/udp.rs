@@ -1,6 +1,8 @@
 // udp tracker functionality
 #![allow(dead_code)]
 
+use crate::LISTENING_PORT;
+
 use super::IpPort;
 
 use std::{io::Error, net::{SocketAddr, UdpSocket}, vec};
@@ -93,8 +95,8 @@ pub fn udp_announce(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort>
         connection_id: conresp.connection_id, action: u32::to_be(1), 
         transaction_id: random::<u32>(), info_hash: info_hash, 
         peer_id: [1; 20], downloaded: 0, left: 0, uploaded: 0,
-        event: 0, ip_address: u32::to_be(1179085955), key: 0, 
-        num_want: u32::to_be(200 as u32), port: u16::to_be(25565),
+        event: 0, ip_address: 0, key: 0, 
+        num_want: u32::to_be(200 as u32), port: u16::to_be(LISTENING_PORT),
     };                                    
     serreq = bincode::serialize(&announce_req).unwrap();
     let mut resp_buf = vec![0u8; 32767];

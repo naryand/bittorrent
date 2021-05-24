@@ -1,14 +1,15 @@
 // tcp peer wire piece downloading
 #![allow(dead_code)]
 
-use super::{msg::{bytes::*, structs::*, Message, try_parse, parse_msg, SUBPIECE_LEN}};
+use super::{msg::{bytes::*, structs::*, Message, try_parse, parse_msg, SUBPIECE_LEN}, seed::Connector};
 use crate::{field::{ByteField, constant::*}, hash::Hasher, tcp_bt::seed::fulfill_req, torrent::Torrent};
 
-use std::{io::{Read, Write}, net::TcpStream, sync::{Arc, Mutex, atomic::AtomicU32}, usize, vec};
+use std::{io::{ErrorKind, Read, Write}, net::TcpStream, 
+          sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}}, usize, vec};
 
 // fetches a single subpiece
 fn fetch_subpiece(stream: &mut TcpStream, torrent: &Arc<Torrent>, piece_field: &Arc<Mutex<ByteField>>, 
-                  count: &Arc<AtomicU32>, field: &mut ByteField, 
+                  connector: &Arc<Connector>, count: &Arc<AtomicU32>, field: &mut ByteField, 
                   index: u32, offset: u32, plen: u32) -> Option<Piece> {
 
     let mut req = Request { 
@@ -18,30 +19,40 @@ fn fetch_subpiece(stream: &mut TcpStream, torrent: &Arc<Torrent>, piece_field: &
     req.index = index.to_be();
     req.offset = offset.to_be();
     req.plen = plen.to_be();
-
+    
     let req_u8 = bincode::serialize(&req).unwrap();
     
     stream.write_all(&req_u8).ok()?;
-
     loop {
         let mut msg: Vec<u8> = vec![];
         let mut extbuf: Vec<u8> = vec![];
         loop {
             let mut buf: Vec<u8> = vec![0; 32767];
-            let bytes = stream.read(&mut buf).ok()?;
-
+            let bytes;
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(b) => {
+                        bytes = b;
+                        break;
+                    }
+                    Err(e) => {
+                        if e.kind() == ErrorKind::WouldBlock {
+                            if connector.brk.load(Ordering::Relaxed) { return None; }
+                            std::thread::sleep(std::time::Duration::from_micros(1));
+                        } else {
+                            return None;
+                        }
+                    }
+                }
+            }
+            
             buf.truncate(bytes);
             if bytes == 0 { return None; }
 
-            for i in &buf {
-                extbuf.push(*i);
-            }
-
+            extbuf.extend_from_slice(&buf);
+            
             if try_parse(&extbuf) {
-                for i in &extbuf {
-                    msg.push(*i);
-                }
-                extbuf.clear();
+                msg.extend_from_slice(&extbuf);
                 break;
             }
         }
@@ -72,16 +83,14 @@ fn fetch_subpiece(stream: &mut TcpStream, torrent: &Arc<Torrent>, piece_field: &
 
 // represents a single connection to a peer, continously fetches subpieces
 pub fn torrent_fetcher(stream: &mut TcpStream, hasher: &Arc<Hasher>, torrent: &Arc<Torrent>, 
-                       field: &Arc<Mutex<ByteField>>, count: &Arc<AtomicU32>) -> Vec<usize> {
+                       field: &Arc<Mutex<ByteField>>, connector: &Arc<Connector>, 
+                       count: &Arc<AtomicU32>) -> Vec<usize> {
 
     // make request and piece bytefield
     let mut req = Request { 
         head: Header { len: 13u32.to_be(), byte: REQUEST }, index: 0, offset: 0, plen: SUBPIECE_LEN.to_be() 
     };
     let num_subpieces = torrent.piece_len/SUBPIECE_LEN as usize;
-    let torrent = Arc::clone(torrent);
-    let piece_field = Arc::clone(field);
-    let hasher = Arc::clone(hasher);
     let mut idxs = vec![];
 
     // get pieces
@@ -90,7 +99,7 @@ pub fn torrent_fetcher(stream: &mut TcpStream, hasher: &Arc<Hasher>, torrent: &A
         let mut piece: Vec<Piece> = vec![];
         let piece_idx;
         { // critical section
-            let mut pf = piece_field.lock().unwrap();
+            let mut pf = field.lock().unwrap();
             piece_idx = match pf.get_empty() {
                 Some(p) => p,
                 None => return idxs,
@@ -111,11 +120,11 @@ pub fn torrent_fetcher(stream: &mut TcpStream, hasher: &Arc<Hasher>, torrent: &A
                     None => break
                 };
                 req.offset = (sub_idx as u32)*SUBPIECE_LEN;
-
-                let subp 
-                    = fetch_subpiece(stream, &torrent, &piece_field, count, &mut subfield,
-                                     req.index, req.offset, SUBPIECE_LEN);
                 
+                let subp 
+                = fetch_subpiece(stream, torrent, field, connector, count, &mut subfield,
+                    req.index, req.offset, SUBPIECE_LEN);
+                    
                 if subp.is_none() { return idxs; }
                 piece.push(subp.unwrap());
             }
@@ -142,7 +151,7 @@ pub fn torrent_fetcher(stream: &mut TcpStream, hasher: &Arc<Hasher>, torrent: &A
                 req.offset = (sub_idx as u32)*SUBPIECE_LEN;
                 
                 let subp 
-                = fetch_subpiece(stream, &torrent, &piece_field, count, &mut last_subfield,
+                = fetch_subpiece(stream, torrent, field, connector, count, &mut last_subfield,
                                  req.index, req.offset, SUBPIECE_LEN);
                 if subp.is_none() { return idxs; }
                 piece.push(subp.unwrap());
@@ -158,7 +167,7 @@ pub fn torrent_fetcher(stream: &mut TcpStream, hasher: &Arc<Hasher>, torrent: &A
                 };
                 
                 let subp 
-                = fetch_subpiece(stream, &torrent, &piece_field, count, &mut final_subfield,
+                = fetch_subpiece(stream, torrent, field, connector, count, &mut final_subfield,
                                  req.index, req.offset, SUBPIECE_LEN);
                 
                 if subp.is_none() { return idxs; }

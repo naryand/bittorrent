@@ -1,10 +1,9 @@
 #![allow(dead_code)]
 
-use crate::{field::{ByteField, constant::*}, file::read_subpiece, 
+use crate::{LISTENING_PORT, field::{ByteField, constant::*}, file::read_subpiece, 
             tcp_bt::{msg::{Message, parse_msg, try_parse}}, torrent::Torrent};
 
-use std::{collections::VecDeque, io::{Read, Write}, net::{SocketAddr, TcpListener, TcpStream}, 
-          sync::{Arc, Condvar, Mutex, atomic::{AtomicBool, AtomicU32}}, thread::JoinHandle};
+use std::{collections::VecDeque, io::{ErrorKind, Read, Write}, net::{SocketAddr, TcpListener, TcpStream}, sync::{Arc, Condvar, Mutex, atomic::{AtomicBool, AtomicU32, Ordering}}, thread::JoinHandle};
 
 use super::msg::structs::Request;
 
@@ -33,7 +32,7 @@ pub fn spawn_listener(connector: &Arc<Connector>) -> JoinHandle<()> {
     let connector = Arc::clone(connector);
 
     std::thread::spawn(move || {
-        let listener = TcpListener::bind("0.0.0.0:25565").unwrap();
+        let listener = TcpListener::bind(("0.0.0.0", LISTENING_PORT)).unwrap();
         listener.set_nonblocking(true).unwrap();
 
         for stream in listener.incoming() {
@@ -45,38 +44,49 @@ pub fn spawn_listener(connector: &Arc<Connector>) -> JoinHandle<()> {
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
-
+                        if connector.brk.load(Ordering::Relaxed) { break }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
                     } else {
                         eprintln!("{}", e);
                         break;
                     }
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     })
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<Request> {
+fn read_request(stream: &mut TcpStream, connector: &Arc<Connector>) -> Option<Request> {
     loop {
         let mut msg: Vec<u8> = vec![];
         let mut extbuf: Vec<u8> = vec![];
         loop {
             let mut buf: Vec<u8> = vec![0; 32767];
-            let bytes = stream.read(&mut buf).ok()?;
-
+            let bytes;
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(b) => {
+                        bytes = b;
+                        break;
+                    }
+                    Err(e) => {
+                        if e.kind() == ErrorKind::WouldBlock {
+                            if connector.brk.load(Ordering::Relaxed) { return None; }
+                            std::thread::sleep(std::time::Duration::from_micros(1));
+                        } else {
+                            return None;
+                        }
+                    }
+                }
+            }
+            
             buf.truncate(bytes);
             if bytes == 0 { return None; }
 
-            for i in &buf {
-                extbuf.push(*i);
-            }
-
+            extbuf.extend_from_slice(&buf);
+            
             if try_parse(&extbuf) {
-                for i in &extbuf {
-                    msg.push(*i);
-                }
-                extbuf.clear();
+                msg.extend_from_slice(&extbuf);
                 break;
             }
         }
@@ -87,7 +97,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
                 Message::Request(r) => r,
                 _ => continue,
             };
-
+            
             return Some(req);
         }
     }
@@ -101,6 +111,7 @@ pub fn fulfill_req(stream: &mut TcpStream, torrent: &Arc<Torrent>, field: &Arc<M
     let index = req.index as usize;
     let offset = req.offset as usize;
 
+    
     let mut subp = match read_subpiece(index, offset, torrent) {
         Some(s) => s,
         None => return Some(()),
@@ -110,7 +121,7 @@ pub fn fulfill_req(stream: &mut TcpStream, torrent: &Arc<Torrent>, field: &Arc<M
     subp.index = subp.index.to_be();
     subp.offset = subp.offset.to_be();
 
-    let subp_u8 = bincode::serialize(&subp).unwrap();
+    let subp_u8 = subp.as_bytes();
 
     match stream.write_all(&subp_u8) {
         Ok(_) => {}
@@ -126,13 +137,11 @@ pub fn torrent_seeder(stream: &mut TcpStream, torrent: &Arc<Torrent>, field: &Ar
     loop {
         if connector.brk.load(std::sync::atomic::Ordering::Relaxed) { break }
 
-        match read_request(stream) {
+        match read_request(stream, connector) {
             Some(r) => {
-                {
-                    match fulfill_req(stream, torrent, field, count, r) {
-                        Some(_) => {}
-                        None => return
-                    }
+                match fulfill_req(stream, torrent, field, count, r) {
+                    Some(_) => {}
+                    None => return
                 }
             }
             None => return,

@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use super::IpPort;
-use crate::{bencode::{Item, decode::parse}};
+use crate::{LISTENING_PORT, bencode::{Item, decode::parse}};
 
 use std::{io::{Error, ErrorKind, Read, Write}, net::{SocketAddr, TcpStream}, str::from_utf8};
 
@@ -16,7 +16,9 @@ pub fn http_announce(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort
         base.push_str(&format!("%{:02x}", byte));
     }
     // append suffix of get request
-    base.push_str("&peer_id=-qB4250-rj6kZQu4P_Mh&port=25565&uploaded=0&downloaded=0&left=1456927919\
+    base.push_str("&peer_id=-qB4250-rj6kZQu4P_Mh&port=");
+    base.push_str(&format!("{}", LISTENING_PORT));
+    base.push_str("&uploaded=0&downloaded=0&left=1456927919\
     &corrupt=0&key=8B26698B&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1&redundant=0\
     HTTP/1.1\r\n\r\n");
     // convert base to Vec<u8> and append to get vector
