@@ -8,21 +8,20 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
 pub enum Item {
-    Int(i64),
+    Int(usize),
     String(Vec<u8>),
     List(Vec<Item>),
     Dict(BTreeMap<Vec<u8>, Item>),
 }
 
-
 impl Item {
     #[allow(dead_code)]
-    pub fn get_int(&self) -> i64 {
+    pub fn get_int(&self) -> usize {
         let int = match &self {
             Item::Int(int) => int,
             _ => unreachable!(),
         };
-        return int.clone();
+        *int
     }
     #[allow(dead_code)]
     pub fn get_str(&self) -> Vec<u8> {
@@ -30,7 +29,7 @@ impl Item {
             Item::String(str) => str,
             _ => unreachable!(),
         };
-        return str.clone();
+        str.clone()
     }
     #[allow(dead_code)]
     pub fn get_list(&self) -> Vec<Item> {
@@ -38,7 +37,7 @@ impl Item {
             Item::List(list) => list,
             _ => unreachable!(),
         };
-        return list.clone();
+        list.clone()
     }
     #[allow(dead_code)]
     pub fn get_dict(&self) -> BTreeMap<Vec<u8>, Item> {
@@ -46,6 +45,6 @@ impl Item {
             Item::Dict(dict) => dict,
             _ => unreachable!(),
         };
-        return dict.clone();
+        dict.clone()
     }
 }

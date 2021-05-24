@@ -1,9 +1,23 @@
 #![allow(dead_code)]
 
-use crate::{LISTENING_PORT, field::{ByteField, constant::*}, file::read_subpiece, 
-            tcp_bt::{msg::{Message, parse_msg, try_parse}}, torrent::Torrent};
+use crate::{
+    field::{constant::*, ByteField},
+    file::read_subpiece,
+    tcp_bt::msg::{parse_msg, try_parse, Message},
+    torrent::Torrent,
+    LISTENING_PORT,
+};
 
-use std::{collections::VecDeque, io::{ErrorKind, Read, Write}, net::{SocketAddr, TcpListener, TcpStream}, sync::{Arc, Condvar, Mutex, atomic::{AtomicBool, AtomicU32, Ordering}}, thread::JoinHandle};
+use std::{
+    collections::VecDeque,
+    io::{ErrorKind, Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
+    sync::{
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        Arc, Condvar, Mutex,
+    },
+    thread::JoinHandle,
+};
 
 use super::msg::structs::Request;
 
@@ -12,7 +26,8 @@ pub enum Peer {
     Stream(TcpStream),
 }
 
-pub struct Connector {// do something with the TcpStream
+pub struct Connector {
+    // do something with the TcpStream
     pub queue: Mutex<VecDeque<Peer>>,
     pub loops: Condvar,
     pub brk: AtomicBool,
@@ -44,7 +59,9 @@ pub fn spawn_listener(connector: &Arc<Connector>) -> JoinHandle<()> {
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
-                        if connector.brk.load(Ordering::Relaxed) { break }
+                        if connector.brk.load(Ordering::Relaxed) {
+                            break;
+                        }
                         std::thread::sleep(std::time::Duration::from_millis(20));
                     } else {
                         eprintln!("{}", e);
@@ -71,7 +88,9 @@ fn read_request(stream: &mut TcpStream, connector: &Arc<Connector>) -> Option<Re
                     }
                     Err(e) => {
                         if e.kind() == ErrorKind::WouldBlock {
-                            if connector.brk.load(Ordering::Relaxed) { return None; }
+                            if connector.brk.load(Ordering::Relaxed) {
+                                return None;
+                            }
                             std::thread::sleep(std::time::Duration::from_micros(1));
                         } else {
                             return None;
@@ -79,39 +98,47 @@ fn read_request(stream: &mut TcpStream, connector: &Arc<Connector>) -> Option<Re
                     }
                 }
             }
-            
+
             buf.truncate(bytes);
-            if bytes == 0 { return None; }
+            if bytes == 0 {
+                return None;
+            }
 
             extbuf.extend_from_slice(&buf);
-            
+
             if try_parse(&extbuf) {
                 msg.extend_from_slice(&extbuf);
                 break;
             }
         }
-        
+
         let parsed = parse_msg(&mut msg);
         for m in parsed {
             let req = match m {
                 Message::Request(r) => r,
                 _ => continue,
             };
-            
+
             return Some(req);
         }
     }
 }
 
-pub fn fulfill_req(stream: &mut TcpStream, torrent: &Arc<Torrent>, field: &Arc<Mutex<ByteField>>, 
-                   count: &Arc<AtomicU32>, req: Request) -> Option<()> {
+pub fn fulfill_req(
+    stream: &mut TcpStream,
+    torrent: &Arc<Torrent>,
+    field: &Arc<Mutex<ByteField>>,
+    count: &Arc<AtomicU32>,
+    req: &Request,
+) -> Option<()> {
     let f = field.lock().unwrap();
-    if f.arr[req.index as usize] != COMPLETE { return Some(()); }
+    if f.arr[req.index as usize] != COMPLETE {
+        return Some(());
+    }
 
     let index = req.index as usize;
     let offset = req.offset as usize;
 
-    
     let mut subp = match read_subpiece(index, offset, torrent) {
         Some(s) => s,
         None => return Some(()),
@@ -129,22 +156,28 @@ pub fn fulfill_req(stream: &mut TcpStream, torrent: &Arc<Torrent>, field: &Arc<M
     }
 
     count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    return Some(());
+
+    Some(())
 }
 
-pub fn torrent_seeder(stream: &mut TcpStream, torrent: &Arc<Torrent>, field: &Arc<Mutex<ByteField>>, 
-                      connector: &Arc<Connector>, count: &Arc<AtomicU32>) {
+pub fn torrent_seeder(
+    stream: &mut TcpStream,
+    torrent: &Arc<Torrent>,
+    field: &Arc<Mutex<ByteField>>,
+    connector: &Arc<Connector>,
+    count: &Arc<AtomicU32>,
+) {
     loop {
-        if connector.brk.load(std::sync::atomic::Ordering::Relaxed) { break }
+        if connector.brk.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
 
         match read_request(stream, connector) {
-            Some(r) => {
-                match fulfill_req(stream, torrent, field, count, r) {
-                    Some(_) => {}
-                    None => return
-                }
-            }
+            Some(req) => match fulfill_req(stream, torrent, field, count, &req) {
+                Some(_) => {}
+                None => return,
+            },
             None => return,
         }
-    }    
+    }
 }

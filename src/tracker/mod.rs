@@ -4,10 +4,14 @@
 pub mod http;
 pub mod udp;
 
-use std::{io::Error, net::{SocketAddr, ToSocketAddrs}, str::from_utf8};
+use std::{
+    io::Error,
+    net::{SocketAddr, ToSocketAddrs},
+    str::from_utf8,
+};
 
+use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use serde::{Serialize, Deserialize};
 
 use crate::bencode::Item;
 
@@ -20,29 +24,36 @@ pub struct IpPort {
 
 impl IpPort {
     // takes in byte string of ip:port pairs and parses them
-    fn from_bytes(bytes: Vec<u8>) -> Vec<Self> {
+    fn from_bytes(bytes: &[u8]) -> Vec<Self> {
         let mut peers: Vec<IpPort> = vec![];
-        if bytes.len() % 6 != 0 { return peers; }
-        for chunk in bytes.chunks(6) { // IpPort is u32 ip, u16 port, 6 bytes
-            let peer: IpPort = IpPort { 
+        if bytes.len() % 6 != 0 {
+            return peers;
+        }
+        for chunk in bytes.chunks(6) {
+            // IpPort is u32 ip, u16 port, 6 bytes
+            let peer: IpPort = IpPort {
                 // big endian
                 ip: u32::from_ne_bytes([chunk[3], chunk[2], chunk[1], chunk[0]]),
                 port: u16::from_ne_bytes([chunk[5], chunk[4]]),
             };
             peers.push(peer);
         }
-        return peers;
+
+        peers
     }
 }
 
 impl std::fmt::Debug for IpPort {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let one: u64 = (self.ip as u64 & (0xff<<24)) >> 24;
-        let two = (self.ip & (0xff<<16)) >> 16; 
-        let three = (self.ip & (0xff<<8)) >> 8; 
-        let four = (self.ip) & 0xff; 
-        write!(f, "[ip: {}.{}.{}.{}, port: {}]", 
-               one, two, three, four, self.port)
+        let one: u64 = (u64::from(self.ip) & (0xff << 24)) >> 24;
+        let two = (self.ip & (0xff << 16)) >> 16;
+        let three = (self.ip & (0xff << 8)) >> 8;
+        let four = (self.ip) & 0xff;
+        write!(
+            f,
+            "[ip: {}.{}.{}.{}, port: {}]",
+            one, two, three, four, self.port
+        )
     }
 }
 
@@ -52,15 +63,16 @@ pub fn get_info_hash(mut bytes: Vec<u8>) -> [u8; 20] {
     for c in bytes.windows(7) {
         len += 1;
         if c.eq(b"4:infod") {
-            break
+            break;
         }
     }
-    bytes.drain(0..len+5);
+    bytes.drain(0..len + 5);
     bytes.pop();
-    
+
     let mut hasher = Sha1::new();
     hasher.update(bytes);
-    return hasher.finalize().into();
+
+    hasher.finalize().into()
 }
 #[derive(Debug, Clone, Copy)]
 pub enum Addr {
@@ -68,26 +80,26 @@ pub enum Addr {
     Http(SocketAddr),
 }
 
-fn make_addr(announce: Item) -> Result<Addr, String> {
+fn make_addr(announce: &Item) -> Result<Addr, String> {
     let mut url = announce.get_str();
     // get url URI i.e udp://
     let mut count = 0;
     let mut len = 0;
     for c in &url {
-        if count == 2 { break }
-        if *c == b'/' { count += 1 }
+        if count == 2 {
+            break;
+        }
+        if *c == b'/' {
+            count += 1
+        }
         len += 1;
     }
     let mut addr;
     // handle each URI
-    let mut udp = false;
-    let _ = match &url[0..len] {
+    let udp = url[0] == b'u';
+    match &url[0..len] {
         b"http://" => url.drain(0.."http://".len()),
-        b"udp://" => { 
-            udp = true; 
-            url.drain(0.."udp://".len())
-        }
-        
+        b"udp://" => url.drain(0.."udp://".len()),
         b"https://" => return Err("HTTPS/TLS not supported".to_string()),
         _ => return Err(format!("unknown URI: {}", from_utf8(&url).unwrap())),
     };
@@ -96,8 +108,11 @@ fn make_addr(announce: Item) -> Result<Addr, String> {
         None => {}
         _ => loop {
             url.pop();
-            if *url.last().unwrap() == b'/' { url.pop(); break }
-        }
+            if *url.last().unwrap() == b'/' {
+                url.pop();
+                break;
+            }
+        },
     }
     // add port number if none, default 80
     addr = from_utf8(&url).unwrap().to_string();
@@ -106,39 +121,36 @@ fn make_addr(announce: Item) -> Result<Addr, String> {
         _ => addr.push_str(":80"),
     }
     // resolve socketaddr
-    match addr.to_socket_addrs().unwrap().nth(0) {
-        Some(s) => if udp {
-            return Ok(Addr::Udp(s))
-        } else {
-            return Ok(Addr::Http(s))
+    match addr.to_socket_addrs().unwrap().next() {
+        Some(s) => {
+            if udp {
+                Ok(Addr::Udp(s))
+            } else {
+                Ok(Addr::Http(s))
+            }
         }
-        None => return Err(format!("no addr resolved")),
+        None => Err("no addr resolved".to_string()),
     }
 }
 
-pub fn get_addr(tree: Vec<Item>) -> Result<Addr, String> {
+pub fn get_addr(tree: &[Item]) -> Result<Addr, String> {
     let dict = tree[0].get_dict();
     match dict.get("announce".as_bytes()) {
-        Some(s) => {
-            match make_addr(s.clone()) {
-                Ok(s) => return Ok(s),
-                Err(e) => {
-                    match dict.get("announce-list".as_bytes()) {
-                        Some(l) => {
-                            for i in l.get_list() {
-                                match make_addr(i.get_list()[0].clone()) {
-                                    Ok(s) => return Ok(s),
-                                    Err(_) => {}
-                                }
-                            }
-                            return Err(e);
+        Some(s) => match make_addr(&s) {
+            Ok(s) => Ok(s),
+            Err(e) => match dict.get("announce-list".as_bytes()) {
+                Some(l) => {
+                    for i in l.get_list() {
+                        if let Ok(s) = make_addr(&i.get_list()[0]) {
+                            return Ok(s);
                         }
-                        None => return Err(e),
                     }
+                    Err(e)
                 }
-            }
-        }
-        None => return Err("no announce url found".to_string()),
+                None => Err(e),
+            },
+        },
+        None => Err("no announce url found".to_string()),
     }
 }
 

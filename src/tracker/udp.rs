@@ -5,13 +5,17 @@ use crate::LISTENING_PORT;
 
 use super::IpPort;
 
-use std::{io::Error, net::{SocketAddr, UdpSocket}, vec};
+use std::{
+    io::Error,
+    net::{SocketAddr, UdpSocket},
+    vec,
+};
 
 use rand::random;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 // literal magic number used for handshake
-const MAGIC: u64 = 0x41727101980;
+const MAGIC: u64 = 0x0417_2710_1980;
 // # of peers to request
 const PEERS: usize = 32;
 
@@ -63,7 +67,8 @@ impl AnnounceResp {
         self.interval = u32::from_be(self.interval);
         self.leechers = u32::from_be(self.leechers);
         self.seeders = u32::from_be(self.seeders);
-        return self
+
+        self
     }
 }
 
@@ -76,10 +81,16 @@ pub fn udp_announce(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort>
     socket.set_nonblocking(false).unwrap();
 
     // init structs and serialize
-    let conreq = ConnectReq { 
-        protocol_id: u64::to_be(MAGIC), action: 0, transaction_id: random::<u32>() 
+    let conreq = ConnectReq {
+        protocol_id: u64::to_be(MAGIC),
+        action: 0,
+        transaction_id: random::<u32>(),
     };
-    let mut conresp = ConnectResp { action: 0, transaction_id: 0, connection_id: 0 }; 
+    let mut conresp = ConnectResp {
+        action: 0,
+        transaction_id: 0,
+        connection_id: 0,
+    };
     let mut serreq: Vec<u8> = bincode::serialize(&conreq).unwrap();
     let mut serresp: Vec<u8> = bincode::serialize(&conresp).unwrap();
 
@@ -91,15 +102,23 @@ pub fn udp_announce(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort>
     conresp = bincode::deserialize(&serresp).unwrap();
 
     // init structs and serialize
-    let announce_req = AnnounceReq { 
-        connection_id: conresp.connection_id, action: u32::to_be(1), 
-        transaction_id: random::<u32>(), info_hash: info_hash, 
-        peer_id: [1; 20], downloaded: 0, left: 0, uploaded: 0,
-        event: 0, ip_address: 0, key: 0, 
-        num_want: u32::to_be(200 as u32), port: u16::to_be(LISTENING_PORT),
-    };                                    
+    let announce_req = AnnounceReq {
+        connection_id: conresp.connection_id,
+        action: u32::to_be(1),
+        transaction_id: random::<u32>(),
+        info_hash,
+        peer_id: [1; 20],
+        downloaded: 0,
+        left: 0,
+        uploaded: 0,
+        event: 0,
+        ip_address: 0,
+        key: 0,
+        num_want: u32::to_be(200),
+        port: u16::to_be(LISTENING_PORT),
+    };
     serreq = bincode::serialize(&announce_req).unwrap();
-    let mut resp_buf = vec![0u8; 32767];
+    let mut resp_buf = vec![0_u8; 32767];
 
     // send announce request and get response
     socket.send_to(&serreq, addr)?;
@@ -109,5 +128,5 @@ pub fn udp_announce(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort>
     resp_buf.drain(0..20);
 
     // deserialize and return peers
-    return Ok(IpPort::from_bytes(resp_buf));
+    Ok(IpPort::from_bytes(&resp_buf))
 }

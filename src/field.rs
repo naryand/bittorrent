@@ -16,9 +16,7 @@ pub struct ByteField {
 impl ByteField {
     // returns true if every index is marked complete
     pub fn is_full(&self) -> bool {
-        let nonfull: usize = self.arr.iter().filter(|x| **x < 2).count();
-        if nonfull == 0 { return true }
-        else { return false }
+        self.arr.iter().filter(|x| **x < 2).count() == 0
     }
 
     // returns an index which is marked empty
@@ -28,6 +26,7 @@ impl ByteField {
                 return Some(i);
             }
         }
-        return None;
+
+        None
     }
 }

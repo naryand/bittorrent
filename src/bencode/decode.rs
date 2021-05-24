@@ -5,17 +5,21 @@ use super::Item;
 
 use std::collections::BTreeMap;
 
-fn parse_int(str: &mut Vec<u8>) -> i64 {
+fn parse_int(str: &mut Vec<u8>) -> usize {
     let mut len: usize = 0;
     let mut int_string: String = String::new();
     for c in str.iter() {
         len += 1;
-        if *c == 'i' as u8 { continue }
-        else if *c == 'e' as u8 { break }
+        if *c == b'i' {
+            continue;
+        }
+        if *c == b'e' {
+            break;
+        }
         int_string.push(*c as char);
     }
     str.drain(0..len);
-    return int_string.parse::<i64>().unwrap();
+    int_string.parse::<usize>().unwrap()
 }
 
 fn parse_str(str: &mut Vec<u8>) -> Vec<u8> {
@@ -23,25 +27,26 @@ fn parse_str(str: &mut Vec<u8>) -> Vec<u8> {
     let mut int_string: String = String::new();
     for c in str.iter() {
         int_len += 1;
-        if *c == ':' as u8 { break }
+        if *c == b':' {
+            break;
+        }
         int_string.push(*c as char);
     }
     let len: usize = int_string.parse::<usize>().unwrap();
     str.drain(0..int_len);
 
-    let mut s: Vec<u8> = Vec::new();
-    for i in 0..len {
-        s.push(str[i] as u8);
-    }
-    str.drain(0..len);
-    return s;
+    let s = str[..len].to_vec();
+    let mut copy = str[len..].to_vec();
+    str.clear();
+    str.append(&mut copy);
+    s
 }
 
 fn parse_list(str: &mut Vec<u8>) -> Vec<Item> {
     str.drain(0..1);
     let mut list: Vec<Item> = Vec::<Item>::new();
     loop {
-        match *str.iter().nth(0).unwrap() as char {
+        match *str.get(0).unwrap() as char {
             'i' => list.push(Item::Int(parse_int(str))),
             'l' => list.push(Item::List(parse_list(str))),
             'd' => list.push(Item::Dict(parse_dict(str))),
@@ -51,16 +56,18 @@ fn parse_list(str: &mut Vec<u8>) -> Vec<Item> {
         }
     }
     str.drain(0..1);
-    return list;
+    list
 }
 
 fn parse_dict(str: &mut Vec<u8>) -> BTreeMap<Vec<u8>, Item> {
     str.drain(0..1);
     let mut dict: BTreeMap<Vec<u8>, Item> = BTreeMap::new();
     loop {
-        if *str.iter().nth(0).unwrap() == 'e' as u8 { break }
+        if *str.get(0).unwrap() == b'e' {
+            break;
+        }
         let s = parse_str(str);
-        match *str.iter().nth(0).unwrap() as char {
+        match *str.get(0).unwrap() as char {
             'i' => dict.insert(s, Item::Int(parse_int(str))),
             'l' => dict.insert(s, Item::List(parse_list(str))),
             'd' => dict.insert(s, Item::Dict(parse_dict(str))),
@@ -69,23 +76,19 @@ fn parse_dict(str: &mut Vec<u8>) -> BTreeMap<Vec<u8>, Item> {
         };
     }
     str.drain(0..1);
-    return dict;
+    dict
 }
 
 pub fn parse(str: &mut Vec<u8>) -> Vec<Item> {
     let mut tree: Vec<Item> = Vec::<Item>::new();
-    loop {
-        let c: u8 = match str.iter().nth(0) {
-            Some(c) => *c,
-            None => break,
-        };
-        match c as char {
-            'i' => tree.push(Item::Int(parse_int(str))),
-            'l' => tree.push(Item::List(parse_list(str))),
-            'd' => tree.push(Item::Dict(parse_dict(str))),
-            '0'..='9' => tree.push(Item::String(parse_str(str))),
+    while let Some(c) = str.get(0) {
+        match *c {
+            b'i' => tree.push(Item::Int(parse_int(str))),
+            b'l' => tree.push(Item::List(parse_list(str))),
+            b'd' => tree.push(Item::Dict(parse_dict(str))),
+            b'0'..=b'9' => tree.push(Item::String(parse_str(str))),
             _ => break,
         }
     }
-    return tree;
+    tree
 }
