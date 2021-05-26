@@ -15,8 +15,6 @@ use {
 
 use std::sync::Arc;
 
-const LISTENING_PORT: u16 = 37834;
-
 fn main() {
     // get arguments
     let args = std::env::args().collect::<Vec<String>>();

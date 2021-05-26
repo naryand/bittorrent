@@ -5,9 +5,8 @@ use super::{msg::structs::Request, Connector};
 use crate::{
     field::{constant::*, ByteField},
     file::read_subpiece,
-    tcp_bt::msg::{parse_msg, try_parse, Message},
+    tcp_bt::msg::{partial_parse, Message},
     torrent::Torrent,
-    LISTENING_PORT,
 };
 
 use std::{
@@ -25,85 +24,39 @@ pub enum Peer {
     Stream(TcpStream),
 }
 
-pub fn spawn_listener(connector: &Arc<Connector>) -> JoinHandle<()> {
+pub fn spawn_listener<'a>(
+    connector: &Arc<Connector>,
+    listener: &Arc<TcpListener>,
+) -> JoinHandle<()> {
     let connector = Arc::clone(connector);
+    let listener = Arc::clone(listener);
+    let builder = std::thread::Builder::new().name("listener".to_owned());
+    builder
+        .spawn(move || {
+            listener.set_nonblocking(true).unwrap();
 
-    std::thread::spawn(move || {
-        let listener = TcpListener::bind(("0.0.0.0", LISTENING_PORT)).unwrap();
-        listener.set_nonblocking(true).unwrap();
-
-        for stream in listener.incoming() {
-            match stream {
-                Ok(s) => {
-                    let mut q = connector.queue.lock().unwrap();
-                    q.push_back(Peer::Stream(s));
-                    connector.loops.notify_one();
-                }
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::WouldBlock {
-                        if connector.brk.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                    } else {
-                        eprintln!("{}", e);
-                        break;
-                    }
-                }
-            }
-        }
-    })
-}
-
-fn read_request(stream: &mut TcpStream, connector: &Arc<Connector>) -> Option<Request> {
-    loop {
-        let mut msg: Vec<u8> = vec![];
-        let mut extbuf: Vec<u8> = vec![];
-        loop {
-            let mut buf: Vec<u8> = vec![0; 32767];
-            let bytes;
-            loop {
-                match stream.read(&mut buf) {
-                    Ok(b) => {
-                        bytes = b;
-                        break;
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => {
+                        let mut q = connector.queue.lock().unwrap();
+                        q.push_back(Peer::Stream(s));
+                        connector.loops.notify_one();
                     }
                     Err(e) => {
-                        if e.kind() == ErrorKind::WouldBlock {
+                        if e.kind() == std::io::ErrorKind::WouldBlock {
                             if connector.brk.load(Ordering::Relaxed) {
-                                return None;
+                                break;
                             }
-                            std::thread::sleep(std::time::Duration::from_micros(1));
+                            std::thread::sleep(std::time::Duration::from_millis(20));
                         } else {
-                            return None;
+                            eprintln!("{}", e);
+                            break;
                         }
                     }
                 }
             }
-
-            buf.truncate(bytes);
-            if bytes == 0 {
-                return None;
-            }
-
-            extbuf.extend_from_slice(&buf);
-
-            if try_parse(&extbuf) {
-                msg.extend_from_slice(&extbuf);
-                break;
-            }
-        }
-
-        let parsed = parse_msg(&mut msg);
-        for m in parsed {
-            let req = match m {
-                Message::Request(r) => r,
-                _ => continue,
-            };
-
-            return Some(req);
-        }
-    }
+        })
+        .unwrap()
 }
 
 pub fn fulfill_req(
@@ -113,31 +66,24 @@ pub fn fulfill_req(
     count: &Arc<AtomicU32>,
     req: &Request,
 ) -> Option<()> {
-    let f = field.lock().unwrap();
-    if f.arr[req.index as usize] != COMPLETE {
-        return Some(());
+    {
+        let f = field.lock().unwrap();
+        if f.arr[req.index as usize] != COMPLETE {
+            return Some(());
+        }
     }
 
     let index = req.index as usize;
     let offset = req.offset as usize;
 
-    let mut subp = match read_subpiece(index, offset, torrent) {
+    let subp = match read_subpiece(index, offset, torrent) {
         Some(s) => s,
-        None => return Some(()),
+        None => return None,
     };
 
-    subp.head.len = subp.head.len.to_be();
-    subp.index = subp.index.to_be();
-    subp.offset = subp.offset.to_be();
-
     let subp_u8 = subp.as_bytes();
-
-    match stream.write_all(&subp_u8) {
-        Ok(_) => {}
-        Err(_) => return None,
-    }
-
-    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    stream.write_all(&subp_u8).ok()?;
+    count.fetch_add(1, Ordering::Relaxed);
 
     Some(())
 }
@@ -149,36 +95,45 @@ pub fn torrent_seeder(
     connector: &Arc<Connector>,
     count: &Arc<AtomicU32>,
 ) {
+    let mut extbuf: Vec<u8> = vec![];
     while !connector.brk.load(std::sync::atomic::Ordering::Relaxed) {
-        match read_request(stream, connector) {
-            Some(req) => {
-                let f = field.lock().unwrap();
-                if f.arr[req.index as usize] != COMPLETE {
-                    continue;
+        let mut buf: Vec<u8> = vec![0; 131072];
+        let bytes;
+        loop {
+            match stream.read(&mut buf) {
+                Ok(b) => {
+                    bytes = b;
+                    break;
                 }
-
-                let index = req.index as usize;
-                let offset = req.offset as usize;
-
-                let mut subp = match read_subpiece(index, offset, torrent) {
-                    Some(s) => s,
-                    None => continue,
-                };
-
-                subp.head.len = subp.head.len.to_be();
-                subp.index = subp.index.to_be();
-                subp.offset = subp.offset.to_be();
-
-                let subp_u8 = subp.as_bytes();
-
-                match stream.write_all(&subp_u8) {
-                    Ok(_) => {}
-                    Err(_) => return,
+                Err(e) => {
+                    if e.kind() == ErrorKind::WouldBlock {
+                        if connector.brk.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_micros(1));
+                    } else {
+                        return;
+                    }
                 }
-
-                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            None => return,
+        }
+        if bytes == 0 {
+            return;
+        }
+
+        buf.truncate(bytes);
+        extbuf.extend_from_slice(&buf);
+
+        let (_, parsed) = partial_parse(&mut extbuf);
+        for m in parsed {
+            match m {
+                Message::Request(req) => {
+                    if fulfill_req(stream, torrent, field, count, &req).is_none() {
+                        return;
+                    }
+                }
+                _ => continue,
+            }
         }
     }
 }

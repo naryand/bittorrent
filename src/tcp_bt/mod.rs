@@ -17,13 +17,12 @@ use crate::{
     },
     torrent::Torrent,
     tracker::{announce, get_addr},
-    LISTENING_PORT,
 };
 
 use std::{
     collections::VecDeque,
     io::Write,
-    net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Condvar, Mutex,
@@ -73,10 +72,7 @@ pub fn send_handshake(
 
     // receive handshake
     let mut buf: Vec<u8> = vec![0; 8192];
-    stream.set_nonblocking(false).unwrap();
     stream.peek(&mut buf).ok()?;
-    stream.set_nonblocking(true).unwrap();
-
     Some(())
 }
 
@@ -103,25 +99,25 @@ pub fn add_torrent(torrent: &Arc<Torrent>, tree: &[Item]) {
     resume_torrent(&torrent, &hasher);
 
     // start connection thread pool
+    let listener = Arc::new(TcpListener::bind(("0.0.0.0", 0)).unwrap());
+    let port = listener.local_addr().unwrap().port();
+    let b = spawn_listener(&connector, &listener);
+
     let scount = Arc::new(AtomicU32::new(0));
-    let b = spawn_listener(&connector);
     let c = spawn_connectors(&connector, &hasher, &torrent, &field, &scount, 50);
 
     let tor = Arc::clone(&torrent);
     let num_subpieces = tor.piece_len / SUBPIECE_LEN as usize;
 
     // main loop control
-    let mut counter: usize = 0;
+    let mut seeded = 0_usize;
+    let mut counter = 0_usize;
     const ANNOUNCE_INTERVAL: usize = 60 / LOOP_SLEEP as usize;
     const LOOP_SLEEP: usize = 1;
 
-    loop {
+    // shutdown when share ratio >= 1
+    while seeded < tor.num_pieces {
         let mut progress = 0;
-        let seeded = scount.load(Ordering::Relaxed) as usize / num_subpieces;
-        // shutdown when share ratio == 1
-        if seeded as usize >= tor.num_pieces {
-            break;
-        }
         {
             let pf = field.lock().unwrap();
             for i in &pf.arr {
@@ -134,7 +130,7 @@ pub fn add_torrent(torrent: &Arc<Torrent>, tree: &[Item]) {
         println!("seeded {}/{}", seeded, tor.num_pieces);
 
         if counter % ANNOUNCE_INTERVAL == 0 {
-            let peers = match announce(addr, tor.info_hash) {
+            let peers = match announce(addr, tor.info_hash, port) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("{}", e);
@@ -143,7 +139,7 @@ pub fn add_torrent(torrent: &Arc<Torrent>, tree: &[Item]) {
                 }
             };
             for peer in peers {
-                if peer.port == LISTENING_PORT {
+                if peer.port == port {
                     continue;
                 }
                 let addr = SocketAddr::new(IpAddr::from(Ipv4Addr::from(peer.ip)), peer.port);
@@ -158,6 +154,11 @@ pub fn add_torrent(torrent: &Arc<Torrent>, tree: &[Item]) {
 
         counter += 1;
         std::thread::sleep(std::time::Duration::from_secs(LOOP_SLEEP as u64));
+
+        seeded = scount.load(Ordering::Relaxed) as usize / num_subpieces;
+        if scount.load(Ordering::Relaxed) as usize % num_subpieces > 0 {
+            seeded += 1;
+        }
     }
 
     // shutdown
@@ -232,13 +233,12 @@ fn spawn_connectors(
                             Peer::Stream(s) => s,
                         };
 
-                        stream.set_nonblocking(true).unwrap();
-                        // stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
-
                         match send_handshake(&mut stream, torrent.info_hash, torrent.info_hash) {
                             Some(_) => {}
                             None => continue,
                         }
+                        stream.set_nonblocking(false).unwrap();
+
                         let v = torrent_fetcher(
                             &mut stream,
                             &hasher,

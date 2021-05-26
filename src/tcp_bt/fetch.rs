@@ -2,13 +2,13 @@
 #![allow(dead_code)]
 
 use super::{
-    msg::{bytes::*, parse_msg, structs::*, try_parse, Message, SUBPIECE_LEN},
+    msg::{bytes::*, structs::*, Message, SUBPIECE_LEN},
     Connector,
 };
 use crate::{
     field::{constant::*, ByteField},
     hash::Hasher,
-    tcp_bt::seed::fulfill_req,
+    tcp_bt::{msg::partial_parse, seed::fulfill_req},
     torrent::Torrent,
 };
 
@@ -55,7 +55,6 @@ fn request_piece(stream: &mut TcpStream, torrent: &Arc<Torrent>, index: u32) -> 
         stream.write_all(&req_u8).ok()?;
         num_subpieces += 1;
     }
-
     Some(num_subpieces)
 }
 
@@ -72,46 +71,47 @@ fn read_piece(
         arr: vec![EMPTY; num_subpieces],
     };
 
+    let mut extbuf: Vec<u8> = vec![];
+    let mut buf = vec![0; 131072];
     while !subfield.is_full() {
-        let mut msg: Vec<u8> = vec![];
-        let mut extbuf: Vec<u8> = vec![];
+        let bytes;
         loop {
-            let mut buf: Vec<u8> = vec![0; 32767];
-            let bytes;
-            loop {
-                match stream.read(&mut buf) {
-                    Ok(b) => {
-                        bytes = b;
-                        break;
-                    }
-                    Err(e) => {
-                        if e.kind() == ErrorKind::WouldBlock {
-                            if connector.brk.load(Ordering::Relaxed) {
-                                return None;
-                            }
-                            std::thread::sleep(std::time::Duration::from_micros(1));
-                        } else {
+            match stream.read(&mut buf) {
+                Ok(b) => {
+                    bytes = b;
+                    break;
+                }
+                Err(e) => {
+                    if e.kind() == ErrorKind::WouldBlock {
+                        if connector.brk.load(Ordering::Relaxed) {
                             return None;
                         }
+                        std::thread::sleep(std::time::Duration::from_micros(1));
+                    } else {
+                        return None;
                     }
                 }
             }
-            if bytes == 0 {
-                return None;
-            }
-
-            buf.truncate(bytes);
-            extbuf.extend_from_slice(&buf);
-
-            if try_parse(&extbuf) {
-                msg.extend_from_slice(&extbuf);
-                break;
-            }
         }
-        let parsed = parse_msg(&mut msg);
+        if bytes == 0 {
+            return None;
+        }
+        unsafe {
+            let x = extbuf.len();
+            extbuf.reserve(bytes);
+            extbuf.set_len(x + bytes);
+            let src = buf.as_ptr();
+            let dst = extbuf.as_mut_ptr().add(x);
+            std::ptr::copy_nonoverlapping(src, dst, bytes);
+        }
+
+        let (_, parsed) = partial_parse(&mut extbuf);
         for m in parsed {
-            let piece = match m {
-                Message::Piece(piece) => piece,
+            match m {
+                Message::Piece(piece) => {
+                    subfield.arr[(piece.offset / SUBPIECE_LEN) as usize] = COMPLETE;
+                    pieces.push(piece);
+                }
                 Message::Request(req) => {
                     match fulfill_req(stream, torrent, piece_field, count, &req) {
                         Some(_) => continue,
@@ -119,9 +119,7 @@ fn read_piece(
                     }
                 }
                 _ => continue,
-            };
-            subfield.arr[(piece.offset / SUBPIECE_LEN) as usize] = COMPLETE;
-            pieces.push(piece);
+            }
         }
     }
 
@@ -151,6 +149,9 @@ pub fn torrent_fetcher(
                     .piece
                     .wait_while(field.lock().unwrap(), |f| {
                         if connector.brk.load(Ordering::Relaxed) {
+                            return false;
+                        }
+                        if f.is_full() {
                             return false;
                         }
                         f.get_empty().is_none()

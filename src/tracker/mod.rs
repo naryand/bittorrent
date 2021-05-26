@@ -154,9 +154,9 @@ pub fn get_addr(tree: &[Item]) -> Result<Addr, String> {
     }
 }
 
-pub fn announce(addr: Addr, info_hash: [u8; 20]) -> Result<Vec<IpPort>, Error> {
+pub fn announce(addr: Addr, info_hash: [u8; 20], port: u16) -> Result<Vec<IpPort>, Error> {
     match addr {
-        Addr::Http(a) => http_announce(a, info_hash),
-        Addr::Udp(a) => udp_announce(a, info_hash),
+        Addr::Http(a) => http_announce(a, info_hash, port),
+        Addr::Udp(a) => udp_announce(a, info_hash, port),
     }
 }

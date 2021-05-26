@@ -15,3 +15,9 @@ sha-1 = "0.9.4"
 [[bin]]
 name = "bittorrent"
 path = "src/main.rs"
+
+[profile.release]
+debug = true
+
+[build]
+rustflags = ["target_cpu=native"]

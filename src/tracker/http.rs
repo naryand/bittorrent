@@ -3,10 +3,7 @@
 
 use super::IpPort;
 
-use crate::{
-    bencode::{decode::parse, Item},
-    LISTENING_PORT,
-};
+use crate::bencode::{decode::parse, Item};
 
 use std::{
     io::{Error, ErrorKind, Read, Write},
@@ -15,7 +12,11 @@ use std::{
 };
 
 // takes in info_hash and tracker addr, announces and gets peer IpPorts
-pub fn http_announce(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort>, Error> {
+pub fn http_announce(
+    addr: SocketAddr,
+    info_hash: [u8; 20],
+    port: u16,
+) -> Result<Vec<IpPort>, Error> {
     let mut get: Vec<u8> = vec![];
     // prefix
     let mut base: String = "GET /announce?info_hash=".to_string();
@@ -25,7 +26,7 @@ pub fn http_announce(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort
     }
     // append suffix of get request
     base.push_str("&peer_id=-qB4250-rj6kZQu4P_Mh&port=");
-    base.push_str(&format!("{}", LISTENING_PORT));
+    base.push_str(&format!("{}", port));
     base.push_str("&uploaded=0&downloaded=0&left=1456927919\
     &corrupt=0&key=8B26698B&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1&redundant=0\
     HTTP/1.1\r\n\r\n");

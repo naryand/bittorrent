@@ -16,7 +16,7 @@ pub struct ByteField {
 impl ByteField {
     // returns true if every index is marked complete
     pub fn is_full(&self) -> bool {
-        self.arr.iter().filter(|x| **x < 2).count() == 0
+        self.arr.iter().filter(|x| **x < COMPLETE).count() == 0
     }
 
     // returns an index which is marked empty

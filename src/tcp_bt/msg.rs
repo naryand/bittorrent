@@ -16,10 +16,9 @@ pub mod bytes {
 }
 
 // takes off top 4 bytes to make u32
-fn parse_u32(msg: &mut Vec<u8>) -> u32 {
+fn parse_u32(msg: &[u8]) -> u32 {
     let mut bytes: [u8; 4] = [0; 4];
     bytes.copy_from_slice(&msg[0..4]);
-    msg.drain(0..4);
     u32::from_be_bytes(bytes)
 }
 
@@ -71,21 +70,14 @@ pub mod structs {
                 len: msg[0],
                 ..Handshake::default()
             };
-            msg.drain(0..1);
 
-            handshake.protocol.clone_from_slice(&msg[..19]);
-            msg.drain(0..19);
-
-            handshake.reserved.clone_from_slice(&msg[..8]);
-            msg.drain(0..8);
-
-            handshake.info_hash.clone_from_slice(&msg[..20]);
-            msg.drain(0..20);
-
-            handshake.peer_id.clone_from_slice(&msg[..20]);
-            msg.drain(0..20);
+            handshake.protocol.clone_from_slice(&msg[1..20]);
+            handshake.reserved.clone_from_slice(&msg[20..28]);
+            handshake.info_hash.clone_from_slice(&msg[28..48]);
+            handshake.peer_id.clone_from_slice(&msg[48..68]);
 
             if handshake.test() {
+                msg.drain(0..68);
                 Some(handshake)
             } else {
                 None
@@ -104,15 +96,14 @@ pub mod structs {
             self.byte <= CANCEL || self.byte == HANDSHAKE
         }
 
-        pub fn parse(msg: &mut Vec<u8>) -> Option<Self> {
+        pub fn parse(msg: &[u8]) -> Option<Self> {
             if msg.len() < 5 {
                 return None;
             }
             let head = Header {
-                len: parse_u32(msg),
-                byte: msg[0],
+                len: parse_u32(&msg[0..4]),
+                byte: msg[4],
             };
-            msg.drain(0..1);
 
             if head.test() {
                 Some(head)
@@ -123,7 +114,7 @@ pub mod structs {
 
         pub fn as_bytes(&self) -> Vec<u8> {
             let mut bytes = vec![];
-            bytes.append(&mut u32::to_ne_bytes(self.len).to_vec());
+            bytes.append(&mut u32::to_be_bytes(self.len).to_vec());
             bytes.push(self.byte);
             bytes
         }
@@ -146,10 +137,11 @@ pub mod structs {
             }
             let have = Have {
                 head: Header::parse(msg)?,
-                index: parse_u32(msg),
+                index: parse_u32(&msg[5..9]),
             };
 
             if have.test() {
+                msg.drain(0..9);
                 Some(have)
             } else {
                 None
@@ -176,18 +168,18 @@ pub mod structs {
                 head: Header::parse(msg)?,
                 ..Bitfield::default()
             };
-            if msg.len() < (bitfield.head.len - 1) as usize {
+            if msg.len() < (bitfield.head.len + 4) as usize {
                 return None;
             }
 
             bitfield
                 .data
-                .append(&mut msg[..((bitfield.head.len - 1) as usize)].to_vec());
-            let mut copy = msg[((bitfield.head.len - 1) as usize)..].to_vec();
-            msg.clear();
-            msg.append(&mut copy);
+                .copy_from_slice(&msg[5..((bitfield.head.len + 4) as usize)]);
 
             if bitfield.test() {
+                let mut copy = msg[((bitfield.head.len + 4) as usize)..].to_vec();
+                msg.clear();
+                msg.append(&mut copy);
                 Some(bitfield)
             } else {
                 None
@@ -216,13 +208,14 @@ pub mod structs {
                 return None;
             }
             let req = Request {
-                head: Header::parse(msg)?,
-                index: parse_u32(msg),
-                offset: parse_u32(msg),
-                plen: parse_u32(msg),
+                head: Header::parse(&msg[0..5])?,
+                index: parse_u32(&msg[5..9]),
+                offset: parse_u32(&msg[9..13]),
+                plen: parse_u32(&msg[13..17]),
             };
 
             if req.test() {
+                msg.drain(0..17);
                 Some(req)
             } else {
                 None
@@ -247,23 +240,36 @@ pub mod structs {
 
         pub fn parse(msg: &mut Vec<u8>) -> Option<Self> {
             let mut piece = Piece {
-                head: Header::parse(msg)?,
+                head: Header::parse(&msg[0..5])?,
                 ..Piece::default()
             };
-            if msg.len() < (piece.head.len - 1) as usize {
+            if msg.len() < (piece.head.len + 4) as usize {
                 return None;
             }
-            piece.index = parse_u32(msg);
-            piece.offset = parse_u32(msg);
-
-            piece
-                .data
-                .append(&mut msg[0..((piece.head.len - 9) as usize)].to_vec());
-            let mut copy = msg[((piece.head.len - 9) as usize)..].to_vec();
-            msg.clear();
-            msg.append(&mut copy);
+            piece.index = parse_u32(&msg[5..9]);
+            piece.offset = parse_u32(&msg[9..13]);
+            unsafe {
+                piece.data = Vec::new();
+                piece.data.reserve((piece.head.len - 9) as usize);
+                piece.data.set_len((piece.head.len - 9) as usize);
+                let src = msg.as_ptr().add(13);
+                let dst = piece.data.as_mut_ptr();
+                std::ptr::copy_nonoverlapping(src, dst, (piece.head.len - 9) as usize);
+                piece.data.set_len((piece.head.len - 9) as usize);
+            }
 
             if piece.test() {
+                let x = msg.len() - (piece.head.len + 4) as usize;
+                unsafe {
+                    std::ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut(
+                        msg.as_mut_ptr(),
+                        (piece.head.len + 4) as usize,
+                    ));
+                    let src = msg.as_ptr().add((piece.head.len + 4) as usize);
+                    let dst = msg.as_mut_ptr();
+                    std::ptr::copy(src, dst, x);
+                    msg.set_len(x);
+                }
                 Some(piece)
             } else {
                 None
@@ -273,10 +279,10 @@ pub mod structs {
         pub fn as_bytes(&self) -> Vec<u8> {
             let mut bytes = vec![];
             bytes.append(&mut self.head.as_bytes());
-            bytes.append(&mut u32::to_ne_bytes(self.index).to_vec());
-            bytes.append(&mut u32::to_ne_bytes(self.offset).to_vec());
+            bytes.append(&mut u32::to_be_bytes(self.index).to_vec());
+            bytes.append(&mut u32::to_be_bytes(self.offset).to_vec());
             bytes.extend_from_slice(&self.data);
-            bytes
+            return bytes;
         }
     }
 
@@ -301,13 +307,14 @@ pub mod structs {
                 return None;
             }
             let cancel = Cancel {
-                head: Header::parse(msg)?,
-                index: parse_u32(msg),
-                offset: parse_u32(msg),
-                plen: parse_u32(msg),
+                head: Header::parse(&msg[0..5])?,
+                index: parse_u32(&msg[5..9]),
+                offset: parse_u32(&msg[9..13]),
+                plen: parse_u32(&msg[13..17]),
             };
 
             if cancel.test() {
+                msg.drain(0..17);
                 Some(cancel)
             } else {
                 None
@@ -363,7 +370,7 @@ fn is_zero(msg: &[u8]) -> bool {
 }
 
 // parses peer wire messages
-pub fn parse_msg(msg: &mut Vec<u8>) -> Vec<Message> {
+pub fn parse_msg(msg: &'static mut Vec<u8>) -> Vec<Message> {
     let mut list: Vec<Message> = vec![];
     loop {
         if is_zero(msg) {
@@ -453,6 +460,81 @@ pub fn try_parse(original: &[u8]) -> bool {
                 }
             }
             _ => return false,
+        }
+    }
+}
+
+pub fn partial_parse(msg: &mut Vec<u8>) -> (bool, Vec<Message>) {
+    let mut list = vec![];
+    if msg.is_empty() {
+        return (false, list);
+    }
+    loop {
+        if is_zero(&msg) {
+            return (false, list);
+        }
+        let _byte = match msg.get(0) {
+            Some(byte) => *byte,
+            None => return (true, list),
+        };
+        let byte = match msg.get(4) {
+            Some(byte) => *byte,
+            None => return (false, list),
+        };
+        match byte {
+            CHOKE => match Header::parse(msg) {
+                Some(x) => {
+                    msg.drain(0..5);
+                    list.push(Message::Choke(x));
+                }
+                None => return (false, list),
+            },
+            UNCHOKE => match Header::parse(msg) {
+                Some(x) => {
+                    msg.drain(0..5);
+                    list.push(Message::Unchoke(x));
+                }
+                None => return (false, list),
+            },
+            INTEREST => match Header::parse(msg) {
+                Some(x) => {
+                    msg.drain(0..5);
+                    list.push(Message::Interest(x));
+                }
+                None => return (false, list),
+            },
+            UNINTEREST => match Header::parse(msg) {
+                Some(x) => {
+                    msg.drain(0..5);
+                    list.push(Message::Uninterest(x));
+                }
+                None => return (false, list),
+            },
+            HAVE => match Have::parse(msg) {
+                Some(x) => list.push(Message::Have(x)),
+                None => return (false, list),
+            },
+            BITFIELD => match Bitfield::parse(msg) {
+                Some(x) => list.push(Message::Bitfield(x)),
+                None => return (false, list),
+            },
+            REQUEST => match Request::parse(msg) {
+                Some(x) => list.push(Message::Request(x)),
+                None => return (false, list),
+            },
+            PIECE => match Piece::parse(msg) {
+                Some(x) => list.push(Message::Piece(x)),
+                None => return (false, list),
+            },
+            CANCEL => match Cancel::parse(msg) {
+                Some(x) => list.push(Message::Cancel(x)),
+                None => return (false, list),
+            },
+            HANDSHAKE => match Handshake::parse(msg) {
+                Some(x) => list.push(Message::Handshake(x)),
+                None => return (false, list),
+            },
+            _ => return (false, list),
         }
     }
 }

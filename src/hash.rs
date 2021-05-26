@@ -48,75 +48,78 @@ pub fn spawn_hash_write(
 ) -> Vec<JoinHandle<()>> {
     let mut handles = vec![];
 
-    for _ in 0..threads {
+    for i in 0..threads {
         let hasher = Arc::clone(hasher);
         let piece_field = Arc::clone(&field);
         let torrent = Arc::clone(torrent);
         let connector = Arc::clone(connector);
         let files = Arc::clone(&torrent.files);
 
-        let handle = std::thread::spawn(move || {
-            loop {
-                let piece;
-                {
-                    // critical section
-                    let mut guard = hasher
-                        .loops
-                        .wait_while(hasher.queue.lock().unwrap(), |q| {
-                            if hasher.brk.load(Ordering::Relaxed) {
-                                return false;
-                            }
-                            q.is_empty()
-                        })
-                        .unwrap();
-                    if hasher.brk.load(Ordering::Relaxed) {
-                        break;
-                    }
-
-                    piece = match guard.pop_front() {
-                        Some(t) => t,
-                        None => break,
-                    }
-                }
-                hasher.empty.notify_all();
-                let index = piece[0].index as usize;
-                let mut flat_piece: Vec<u8> = vec![];
-                for s in &piece {
-                    flat_piece.extend_from_slice(&s.data); // assumes ordered by offset
-                }
-
-                let mut hasher = Sha1::new();
-                hasher.update(flat_piece);
-                let piece_hash = hasher.finalize().to_vec();
-
-                if piece_hash
-                    .iter()
-                    .zip(&torrent.hashes[index])
-                    .filter(|&(a, b)| *a == *b)
-                    .count()
-                    != 20
-                {
+        let builder = std::thread::Builder::new().name(format!("Hash{}", i));
+        let handle = builder
+            .spawn(move || {
+                loop {
+                    let piece;
                     {
                         // critical section
-                        // unreserve piece
-                        let mut pf = piece_field.lock().unwrap();
-                        pf.arr[index] = EMPTY;
-                        // notify waiting connections
-                        connector.piece.notify_one();
-                    }
-                    continue;
-                }
+                        let mut guard = hasher
+                            .loops
+                            .wait_while(hasher.queue.lock().unwrap(), |q| {
+                                if hasher.brk.load(Ordering::Relaxed) {
+                                    return false;
+                                }
+                                q.is_empty()
+                            })
+                            .unwrap();
+                        if hasher.brk.load(Ordering::Relaxed) {
+                            break;
+                        }
 
-                for s in &piece {
-                    write_subpiece(s, torrent.piece_len, &files);
+                        piece = match guard.pop_front() {
+                            Some(t) => t,
+                            None => break,
+                        }
+                    }
+                    hasher.empty.notify_all();
+                    let index = piece[0].index as usize;
+                    let mut flat_piece: Vec<u8> = vec![];
+                    for s in &piece {
+                        flat_piece.extend_from_slice(&s.data); // assumes ordered by offset
+                    }
+
+                    let mut hasher = Sha1::new();
+                    hasher.update(flat_piece);
+                    let piece_hash = hasher.finalize().to_vec();
+
+                    if piece_hash
+                        .iter()
+                        .zip(&torrent.hashes[index])
+                        .filter(|&(a, b)| *a == *b)
+                        .count()
+                        != 20
+                    {
+                        {
+                            // critical section
+                            // unreserve piece
+                            let mut pf = piece_field.lock().unwrap();
+                            pf.arr[index] = EMPTY;
+                            // notify waiting connections
+                            connector.piece.notify_one();
+                        }
+                        continue;
+                    }
+
+                    for s in &piece {
+                        write_subpiece(s, torrent.piece_len, &files);
+                    }
+                    {
+                        // critical section
+                        let mut pf = piece_field.lock().unwrap();
+                        pf.arr[index] = COMPLETE;
+                    }
                 }
-                {
-                    // critical section
-                    let mut pf = piece_field.lock().unwrap();
-                    pf.arr[index] = COMPLETE;
-                }
-            }
-        });
+            })
+            .unwrap();
         handles.push(handle);
     }
 

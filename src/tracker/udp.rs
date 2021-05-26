@@ -1,8 +1,6 @@
 // udp tracker functionality
 #![allow(dead_code)]
 
-use crate::LISTENING_PORT;
-
 use super::IpPort;
 
 use std::{
@@ -73,7 +71,11 @@ impl AnnounceResp {
 }
 
 // announces to udp tracker, gets vector of ip and ports
-pub fn udp_announce(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort>, Error> {
+pub fn udp_announce(
+    addr: SocketAddr,
+    info_hash: [u8; 20],
+    port: u16,
+) -> Result<Vec<IpPort>, Error> {
     // set up udp socket
     let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
     // socket.set_read_timeout(
@@ -115,7 +117,7 @@ pub fn udp_announce(addr: SocketAddr, info_hash: [u8; 20]) -> Result<Vec<IpPort>
         ip_address: 0,
         key: 0,
         num_want: u32::to_be(200),
-        port: u16::to_be(LISTENING_PORT),
+        port: u16::to_be(port),
     };
     serreq = bincode::serialize(&announce_req).unwrap();
     let mut resp_buf = vec![0_u8; 32767];
