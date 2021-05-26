@@ -30,7 +30,7 @@ impl Torrent {
 
         let (files, file_len) = parse_file(&info);
 
-        Torrent {
+        Self {
             info_hash: get_info_hash(bytes.to_vec()),
             files,
             file_len,

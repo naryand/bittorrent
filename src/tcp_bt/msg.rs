@@ -26,6 +26,7 @@ fn parse_u32(msg: &mut Vec<u8>) -> u32 {
 // structs for each type of message
 pub mod structs {
     use super::{bytes::*, parse_u32};
+
     use serde::{Deserialize, Serialize};
     #[derive(Serialize, Deserialize, Debug)]
     pub struct Handshake {
@@ -167,7 +168,7 @@ pub mod structs {
             if self.head.byte != BITFIELD {
                 return false;
             }
-            self.head.len == (self.data.len() + 1) as u32
+            self.head.len as usize == (self.data.len() + 1)
         }
 
         pub fn parse(msg: &mut Vec<u8>) -> Option<Self> {
@@ -241,7 +242,7 @@ pub mod structs {
             if self.head.byte != PIECE {
                 return false;
             }
-            self.head.len == (self.data.len() + 9) as u32
+            self.head.len as usize == (self.data.len() + 9)
         }
 
         pub fn parse(msg: &mut Vec<u8>) -> Option<Self> {

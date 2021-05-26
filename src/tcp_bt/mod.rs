@@ -13,7 +13,7 @@ use crate::{
     tcp_bt::{
         fetch::torrent_fetcher,
         msg::{bytes::*, structs::*, SUBPIECE_LEN},
-        seed::{spawn_listener, torrent_seeder, Connector, Peer},
+        seed::{spawn_listener, torrent_seeder, Peer},
     },
     torrent::Torrent,
     tracker::{announce, get_addr},
@@ -21,15 +21,34 @@ use crate::{
 };
 
 use std::{
+    collections::VecDeque,
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
     sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        Arc, Condvar, Mutex,
     },
     thread::JoinHandle,
     time::Duration,
 };
+pub struct Connector {
+    // do something with the TcpStream
+    pub queue: Mutex<VecDeque<Peer>>,
+    pub loops: Condvar,
+    pub piece: Condvar,
+    pub brk: AtomicBool,
+}
+
+impl Connector {
+    pub fn new() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            loops: Condvar::new(),
+            piece: Condvar::new(),
+            brk: AtomicBool::new(false),
+        }
+    }
+}
 
 pub fn send_handshake(
     stream: &mut TcpStream,
@@ -89,7 +108,7 @@ pub fn add_torrent(torrent: &Arc<Torrent>, tree: &[Item]) {
     let c = spawn_connectors(&connector, &hasher, &torrent, &field, &scount, 50);
 
     let tor = Arc::clone(&torrent);
-    let num_subpieces = tor.piece_len as u32 / SUBPIECE_LEN;
+    let num_subpieces = tor.piece_len / SUBPIECE_LEN as usize;
 
     // main loop control
     let mut counter: usize = 0;
@@ -98,9 +117,9 @@ pub fn add_torrent(torrent: &Arc<Torrent>, tree: &[Item]) {
 
     loop {
         let mut progress = 0;
-        let seeded = scount.load(Ordering::Relaxed) / num_subpieces;
+        let seeded = scount.load(Ordering::Relaxed) as usize / num_subpieces;
         // shutdown when share ratio == 1
-        if seeded >= tor.num_pieces as u32 {
+        if seeded as usize >= tor.num_pieces {
             break;
         }
         {
@@ -213,7 +232,7 @@ fn spawn_connectors(
                             Peer::Stream(s) => s,
                         };
 
-                        stream.set_nonblocking(false).unwrap();
+                        stream.set_nonblocking(true).unwrap();
                         // stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
 
                         match send_handshake(&mut stream, torrent.info_hash, torrent.info_hash) {
@@ -235,6 +254,7 @@ fn spawn_connectors(
                             for i in &v {
                                 if f.arr[*i] == IN_PROGRESS {
                                     f.arr[*i] = EMPTY;
+                                    connector.piece.notify_one();
                                 }
                             }
                             for i in &f.arr {

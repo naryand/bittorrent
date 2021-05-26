@@ -8,20 +8,21 @@ Client for the peer to peer BitTorrent protocol from scratch in Rust.
 
 - Bencode encoding + decoding
 - Parsing `.torrent` files for their metadata
-- HTTP and UDP tracker protocol for discovering peers
+- Discovering peers with HTTP and UDP tracker protocols
 - TCP peer wire message parsing
 - Concurrently downloading pieces from many peers
 - Multithreaded SHA1 hash checking for verifying pieces
 - Downloading single and multi-file torrents
 - Resuming partially complete torrents
 - Seeding requested pieces
+- Pipelining piece requests for higher throughput
 
 ### To do
-- Piece paging
-- Rarest first/Choking/Super seeding algorithms
 - DHT, PEX, NAT traversal for more peers
+- Rarest first/Choking/Super seeding algorithms
 - Graphical/Web interface
 - uTorrent transport protocol
+- Piece paging/caching
 
 ## Usage
 

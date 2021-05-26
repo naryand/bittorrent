@@ -4,7 +4,7 @@
 use crate::{
     field::{constant::*, ByteField},
     file::write_subpiece,
-    tcp_bt::{msg::structs::Piece, seed::Connector},
+    tcp_bt::{msg::structs::Piece, Connector},
     torrent::Torrent,
 };
 
@@ -21,7 +21,7 @@ use sha1::{Digest, Sha1};
 
 // struct for holding relevant variables for hashing threads
 pub struct Hasher {
-    pub queue: Mutex<VecDeque<(Vec<Piece>, Vec<u8>)>>,
+    pub queue: Mutex<VecDeque<Vec<Piece>>>,
     pub empty: Condvar,
     pub loops: Condvar,
     pub brk: AtomicBool,
@@ -29,7 +29,7 @@ pub struct Hasher {
 
 impl Hasher {
     pub fn new() -> Self {
-        Hasher {
+        Self {
             queue: Mutex::new(VecDeque::new()),
             empty: Condvar::new(),
             loops: Condvar::new(),
@@ -57,7 +57,7 @@ pub fn spawn_hash_write(
 
         let handle = std::thread::spawn(move || {
             loop {
-                let tuple;
+                let piece;
                 {
                     // critical section
                     let mut guard = hasher
@@ -73,13 +73,12 @@ pub fn spawn_hash_write(
                         break;
                     }
 
-                    tuple = match guard.pop_front() {
+                    piece = match guard.pop_front() {
                         Some(t) => t,
                         None => break,
                     }
                 }
                 hasher.empty.notify_all();
-                let (piece, hash) = tuple;
                 let index = piece[0].index as usize;
                 let mut flat_piece: Vec<u8> = vec![];
                 for s in &piece {
@@ -92,7 +91,7 @@ pub fn spawn_hash_write(
 
                 if piece_hash
                     .iter()
-                    .zip(&hash)
+                    .zip(&torrent.hashes[index])
                     .filter(|&(a, b)| *a == *b)
                     .count()
                     != 20
@@ -103,7 +102,7 @@ pub fn spawn_hash_write(
                         let mut pf = piece_field.lock().unwrap();
                         pf.arr[index] = EMPTY;
                         // notify waiting connections
-                        connector.loops.notify_one();
+                        connector.piece.notify_one();
                     }
                     continue;
                 }

@@ -3,7 +3,7 @@
 
 use super::{
     msg::{bytes::*, parse_msg, structs::*, try_parse, Message, SUBPIECE_LEN},
-    seed::Connector,
+    Connector,
 };
 use crate::{
     field::{constant::*, ByteField},
@@ -22,32 +22,57 @@ use std::{
     usize, vec,
 };
 
-// fetches a single subpiece
-fn fetch_subpiece(
-    stream: &mut TcpStream,
-    torrent: &Arc<Torrent>,
-    piece_field: &Arc<Mutex<ByteField>>,
-    connector: &Arc<Connector>,
-    count: &Arc<AtomicU32>,
-    field: &mut ByteField,
-    req: &Request,
-) -> Option<Piece> {
+fn request_piece(stream: &mut TcpStream, torrent: &Arc<Torrent>, index: u32) -> Option<usize> {
     let mut request = Request {
         head: Header {
             len: 13_u32.to_be(),
             byte: REQUEST,
         },
+        index: index.to_be(),
+        plen: SUBPIECE_LEN.to_be(),
         ..Request::default()
     };
 
-    request.index = req.index.to_be();
-    request.offset = req.offset.to_be();
-    request.plen = req.plen.to_be();
+    let remainder;
+    if index as usize == torrent.num_pieces - 1 {
+        remainder = torrent.file_len % torrent.piece_len;
+    } else {
+        remainder = torrent.piece_len;
+    }
 
-    let req_u8 = bincode::serialize(&request).unwrap();
+    let mut num_subpieces = remainder / SUBPIECE_LEN as usize;
+    for i in 0..num_subpieces {
+        request.offset = u32::to_be((i as u32) * SUBPIECE_LEN);
+        let req_u8 = bincode::serialize(&request).unwrap();
+        stream.write_all(&req_u8).ok()?;
+    }
 
-    stream.write_all(&req_u8).ok()?;
-    loop {
+    if remainder % SUBPIECE_LEN as usize > 0 {
+        let last_plen = remainder % SUBPIECE_LEN as usize;
+        request.plen = u32::to_be(last_plen as u32);
+        request.offset = u32::to_be(num_subpieces as u32 * SUBPIECE_LEN);
+        let req_u8 = bincode::serialize(&request).unwrap();
+        stream.write_all(&req_u8).ok()?;
+        num_subpieces += 1;
+    }
+
+    Some(num_subpieces)
+}
+
+fn read_piece(
+    stream: &mut TcpStream,
+    torrent: &Arc<Torrent>,
+    piece_field: &Arc<Mutex<ByteField>>,
+    connector: &Arc<Connector>,
+    count: &Arc<AtomicU32>,
+    num_subpieces: usize,
+) -> Option<Vec<Piece>> {
+    let mut pieces = vec![];
+    let mut subfield = ByteField {
+        arr: vec![EMPTY; num_subpieces],
+    };
+
+    while !subfield.is_full() {
         let mut msg: Vec<u8> = vec![];
         let mut extbuf: Vec<u8> = vec![];
         loop {
@@ -71,12 +96,11 @@ fn fetch_subpiece(
                     }
                 }
             }
-
-            buf.truncate(bytes);
             if bytes == 0 {
                 return None;
             }
 
+            buf.truncate(bytes);
             extbuf.extend_from_slice(&buf);
 
             if try_parse(&extbuf) {
@@ -84,12 +108,9 @@ fn fetch_subpiece(
                 break;
             }
         }
-
         let parsed = parse_msg(&mut msg);
-        let mut piece;
-
         for m in parsed {
-            piece = match m {
+            let piece = match m {
                 Message::Piece(piece) => piece,
                 Message::Request(req) => {
                     match fulfill_req(stream, torrent, piece_field, count, &req) {
@@ -99,15 +120,12 @@ fn fetch_subpiece(
                 }
                 _ => continue,
             };
-
-            if piece.data.is_empty() {
-                continue;
-            }
-
-            field.arr[(piece.offset / req.plen) as usize] = COMPLETE;
-            return Some(piece);
+            subfield.arr[(piece.offset / SUBPIECE_LEN) as usize] = COMPLETE;
+            pieces.push(piece);
         }
     }
+
+    Some(pieces)
 }
 
 // represents a single connection to a peer, continously fetches subpieces
@@ -119,135 +137,59 @@ pub fn torrent_fetcher(
     connector: &Arc<Connector>,
     count: &Arc<AtomicU32>,
 ) -> Vec<usize> {
-    // make request and piece bytefield
-    let mut req = Request {
-        head: Header {
-            len: 13_u32.to_be(),
-            byte: REQUEST,
-        },
-        index: 0,
-        offset: 0,
-        plen: 0,
-    };
-    let num_subpieces = torrent.piece_len / SUBPIECE_LEN as usize;
     let mut idxs = vec![];
-
     // get pieces
     loop {
-        // pick a piece
-        let mut piece: Vec<Piece> = vec![];
-        let piece_idx;
-        {
-            // critical section
-            let mut pf = field.lock().unwrap();
-            piece_idx = match pf.get_empty() {
-                Some(p) => p,
-                None => return idxs,
-            };
-            pf.arr[piece_idx] = IN_PROGRESS;
+        let mut nums = vec![];
+        // peers reject if you request more than 1 piece
+        for _ in 0..1 {
+            // pick a piece
+            let piece_idx;
+            {
+                // critical section
+                let mut pf = connector
+                    .piece
+                    .wait_while(field.lock().unwrap(), |f| {
+                        if connector.brk.load(Ordering::Relaxed) {
+                            return false;
+                        }
+                        f.get_empty().is_none()
+                    })
+                    .unwrap();
+                if let Some(p) = pf.get_empty() {
+                    piece_idx = p
+                } else {
+                    return idxs;
+                }
+                pf.arr[piece_idx] = IN_PROGRESS;
+            }
+            idxs.push(piece_idx);
+
+            // fetch piece
+            let num = request_piece(stream, torrent, piece_idx as u32);
+
+            if let Some(n) = num {
+                nums.push(n)
+            } else {
+                return idxs;
+            }
         }
-        idxs.push(piece_idx);
 
-        // all except last piece
-        if piece_idx < torrent.num_pieces - 1 {
-            req.index = piece_idx as u32;
-            let mut subfield = ByteField {
-                arr: vec![EMPTY; num_subpieces],
-            };
-
-            // subpieces
-            while let Some(sub_idx) = subfield.get_empty() {
-                req.offset = (sub_idx as u32) * SUBPIECE_LEN;
-                req.plen = SUBPIECE_LEN;
-                let subp = fetch_subpiece(
-                    stream,
-                    torrent,
-                    field,
-                    connector,
-                    count,
-                    &mut subfield,
-                    &req,
-                );
-
-                if subp.is_none() {
-                    return idxs;
-                }
-                piece.push(subp.unwrap());
+        for num_subpieces in nums {
+            let p = read_piece(stream, torrent, field, connector, count, num_subpieces);
+            let mut piece;
+            if let Some(p) = p {
+                piece = p
+            } else {
+                return idxs;
             }
 
+            // push piece to hash+writer queue
             piece.sort_by_key(|x| x.offset);
             {
                 // critical section
                 let mut q = hasher.queue.lock().unwrap();
-                q.push_back((piece, torrent.hashes[piece_idx].clone()));
-                hasher.loops.notify_one();
-            }
-        } else {
-            // last piece
-            let last_remainder: usize =
-                torrent.file_len - (torrent.num_pieces - 1) * torrent.piece_len;
-            let num_last_subs: usize = last_remainder / SUBPIECE_LEN as usize;
-            let mut last_subfield = ByteField {
-                arr: vec![EMPTY; num_last_subs],
-            };
-
-            // all except last subpiece
-            req.index = torrent.num_pieces as u32 - 1;
-            loop {
-                let sub = last_subfield.get_empty();
-                if sub == None {
-                    break;
-                }
-                let sub_idx = sub.unwrap();
-
-                req.offset = (sub_idx as u32) * SUBPIECE_LEN;
-                req.plen = SUBPIECE_LEN;
-
-                let subp = fetch_subpiece(
-                    stream,
-                    torrent,
-                    field,
-                    connector,
-                    count,
-                    &mut last_subfield,
-                    &req,
-                );
-                if subp.is_none() {
-                    return idxs;
-                }
-                piece.push(subp.unwrap());
-            }
-
-            // last subpiece
-            let last_sub_len: usize = last_remainder - (num_last_subs * SUBPIECE_LEN as usize);
-            if last_sub_len != 0 {
-                req.offset = (num_last_subs as u32) * SUBPIECE_LEN;
-                req.plen = last_sub_len as u32;
-                let mut final_subfield = ByteField {
-                    arr: vec![EMPTY; (req.offset / req.plen) as usize + 1],
-                };
-
-                let subp = fetch_subpiece(
-                    stream,
-                    torrent,
-                    field,
-                    connector,
-                    count,
-                    &mut final_subfield,
-                    &req,
-                );
-
-                if subp.is_none() {
-                    return idxs;
-                }
-                piece.push(subp.unwrap());
-            }
-
-            piece.sort_by_key(|x| x.offset);
-            {
-                // critical section
-                let mut q = hasher.queue.lock().unwrap();
-                q.push_back((piece, torrent.hashes[torrent.num_pieces - 1].clone()));
+                q.push_back(piece);
                 hasher.loops.notify_one();
             }
         }

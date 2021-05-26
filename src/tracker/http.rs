@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use super::IpPort;
+
 use crate::{
     bencode::{decode::parse, Item},
     LISTENING_PORT,

@@ -165,17 +165,19 @@ pub fn resume_torrent(torrent: &Arc<Torrent>, hasher: &Arc<Hasher>) {
         }
         {
             let mut q = hasher.queue.lock().unwrap();
-            q.push_back((piece, torrent.hashes[i].clone()));
+            q.push_back(piece);
             hasher.loops.notify_one();
         }
     }
 
     {
         // wait thread until hashing finishes
+        #[rustfmt::skip]
         let _guard = hasher
             .empty
-            .wait_while(hasher.queue.lock().unwrap(), |q| !q.is_empty())
-            .unwrap();
+            .wait_while(hasher.queue.lock().unwrap(),
+                |q| !q.is_empty()
+            ).unwrap();
     }
 }
 
