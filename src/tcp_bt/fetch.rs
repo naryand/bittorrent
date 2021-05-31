@@ -2,23 +2,20 @@
 #![allow(dead_code)]
 
 use super::{
-    msg::{bytes::*, structs::*, Message, SUBPIECE_LEN},
+    msg::{bytes::*, structs::*, SUBPIECE_LEN},
+    parse::Parser,
     Connector,
 };
 use crate::{
     field::{constant::*, ByteField},
-    hash::Hasher,
-    tcp_bt::{msg::partial_parse, seed::fulfill_req},
+    tcp_bt::parse::ParseItem,
     torrent::Torrent,
 };
 
 use std::{
     io::{ErrorKind, Read, Write},
     net::TcpStream,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc, Mutex,
-    },
+    sync::{atomic::Ordering, mpsc, Arc, Mutex},
     usize, vec,
 };
 
@@ -60,20 +57,28 @@ fn request_piece(stream: &mut TcpStream, torrent: &Arc<Torrent>, index: u32) -> 
 
 fn read_piece(
     stream: &mut TcpStream,
-    torrent: &Arc<Torrent>,
-    piece_field: &Arc<Mutex<ByteField>>,
+    parser: &Arc<Parser>,
     connector: &Arc<Connector>,
-    count: &Arc<AtomicU32>,
     num_subpieces: usize,
-) -> Option<Vec<Piece>> {
-    let mut pieces = vec![];
-    let mut subfield = ByteField {
+) -> Option<()> {
+    let subfield = ByteField {
         arr: vec![EMPTY; num_subpieces],
     };
 
-    let mut extbuf: Vec<u8> = vec![];
-    let mut buf = vec![0; 131072];
-    while !subfield.is_full() {
+    let am_subfield = Arc::new(Mutex::new(subfield));
+    let (tx, rx) = mpsc::channel();
+    let item = ParseItem {
+        rx,
+        stream: Arc::new(Mutex::new(stream.try_clone().unwrap())),
+        field: Some(Arc::clone(&am_subfield)),
+    };
+    {
+        let mut q = parser.queue.lock().unwrap();
+        q.push_back(item);
+        parser.loops.notify_one();
+    }
+    let mut buf = vec![0; 65536];
+    loop {
         let bytes;
         loop {
             match stream.read(&mut buf) {
@@ -86,7 +91,14 @@ fn read_piece(
                         if connector.brk.load(Ordering::Relaxed) {
                             return None;
                         }
-                        std::thread::sleep(std::time::Duration::from_micros(1));
+                        {
+                            let subf = am_subfield.lock().unwrap();
+                            if subf.is_full() {
+                                drop(tx);
+                                return Some(());
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_micros(500));
                     } else {
                         return None;
                     }
@@ -96,44 +108,18 @@ fn read_piece(
         if bytes == 0 {
             return None;
         }
-        unsafe {
-            let x = extbuf.len();
-            extbuf.reserve(bytes);
-            extbuf.set_len(x + bytes);
-            let src = buf.as_ptr();
-            let dst = extbuf.as_mut_ptr().add(x);
-            std::ptr::copy_nonoverlapping(src, dst, bytes);
-        }
 
-        let (_, parsed) = partial_parse(&mut extbuf);
-        for m in parsed {
-            match m {
-                Message::Piece(piece) => {
-                    subfield.arr[(piece.offset / SUBPIECE_LEN) as usize] = COMPLETE;
-                    pieces.push(piece);
-                }
-                Message::Request(req) => {
-                    match fulfill_req(stream, torrent, piece_field, count, &req) {
-                        Some(_) => continue,
-                        None => return None,
-                    }
-                }
-                _ => continue,
-            }
-        }
+        tx.send(buf[..bytes].to_vec()).unwrap();
     }
-
-    Some(pieces)
 }
 
 // represents a single connection to a peer, continously fetches subpieces
 pub fn torrent_fetcher(
     stream: &mut TcpStream,
-    hasher: &Arc<Hasher>,
+    parser: &Arc<Parser>,
     torrent: &Arc<Torrent>,
     field: &Arc<Mutex<ByteField>>,
     connector: &Arc<Connector>,
-    count: &Arc<AtomicU32>,
 ) -> Vec<usize> {
     let mut idxs = vec![];
     // get pieces
@@ -175,23 +161,9 @@ pub fn torrent_fetcher(
                 return idxs;
             }
         }
-
         for num_subpieces in nums {
-            let p = read_piece(stream, torrent, field, connector, count, num_subpieces);
-            let mut piece;
-            if let Some(p) = p {
-                piece = p
-            } else {
+            if read_piece(stream, parser, connector, num_subpieces).is_none() {
                 return idxs;
-            }
-
-            // push piece to hash+writer queue
-            piece.sort_by_key(|x| x.offset);
-            {
-                // critical section
-                let mut q = hasher.queue.lock().unwrap();
-                q.push_back(piece);
-                hasher.loops.notify_one();
             }
         }
     }

@@ -4,7 +4,7 @@
 use crate::{
     field::{constant::*, ByteField},
     file::write_subpiece,
-    tcp_bt::{msg::structs::Piece, Connector},
+    tcp_bt::{connect::Connector, msg::structs::Piece},
     torrent::Torrent,
 };
 
@@ -82,7 +82,7 @@ pub fn spawn_hash_write(
                     }
                     hasher.empty.notify_all();
                     let index = piece[0].index as usize;
-                    let mut flat_piece: Vec<u8> = vec![];
+                    let mut flat_piece = Vec::with_capacity(torrent.piece_len);
                     for s in &piece {
                         flat_piece.extend_from_slice(&s.data); // assumes ordered by offset
                     }

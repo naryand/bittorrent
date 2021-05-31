@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use super::{msg::structs::Request, Connector};
+use super::{msg::structs::Request, parse::Parser, Connector};
 
 use crate::{
     field::{constant::*, ByteField},
     file::read_subpiece,
-    tcp_bt::msg::{partial_parse, Message},
+    tcp_bt::parse::ParseItem,
     torrent::Torrent,
 };
 
@@ -14,7 +14,7 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicU32, Ordering},
-        Arc, Mutex,
+        mpsc, Arc, Mutex,
     },
     thread::JoinHandle,
 };
@@ -24,10 +24,7 @@ pub enum Peer {
     Stream(TcpStream),
 }
 
-pub fn spawn_listener<'a>(
-    connector: &Arc<Connector>,
-    listener: &Arc<TcpListener>,
-) -> JoinHandle<()> {
+pub fn spawn_listener(connector: &Arc<Connector>, listener: &Arc<TcpListener>) -> JoinHandle<()> {
     let connector = Arc::clone(connector);
     let listener = Arc::clone(listener);
     let builder = std::thread::Builder::new().name("listener".to_owned());
@@ -88,16 +85,20 @@ pub fn fulfill_req(
     Some(())
 }
 
-pub fn torrent_seeder(
-    stream: &mut TcpStream,
-    torrent: &Arc<Torrent>,
-    field: &Arc<Mutex<ByteField>>,
-    connector: &Arc<Connector>,
-    count: &Arc<AtomicU32>,
-) {
-    let mut extbuf: Vec<u8> = vec![];
-    while !connector.brk.load(std::sync::atomic::Ordering::Relaxed) {
-        let mut buf: Vec<u8> = vec![0; 131072];
+pub fn torrent_seeder(stream: &mut TcpStream, parser: &Arc<Parser>, connector: &Arc<Connector>) {
+    let (tx, rx) = mpsc::channel();
+    let item = ParseItem {
+        rx,
+        stream: Arc::new(Mutex::new(stream.try_clone().unwrap())),
+        field: None,
+    };
+    {
+        let mut q = parser.queue.lock().unwrap();
+        q.push_back(item);
+        parser.loops.notify_one();
+    }
+    let mut buf = vec![0; 65536];
+    while !connector.brk.load(Ordering::Relaxed) {
         let bytes;
         loop {
             match stream.read(&mut buf) {
@@ -121,19 +122,7 @@ pub fn torrent_seeder(
             return;
         }
 
-        buf.truncate(bytes);
-        extbuf.extend_from_slice(&buf);
-
-        let (_, parsed) = partial_parse(&mut extbuf);
-        for m in parsed {
-            match m {
-                Message::Request(req) => {
-                    if fulfill_req(stream, torrent, field, count, &req).is_none() {
-                        return;
-                    }
-                }
-                _ => continue,
-            }
-        }
+        tx.send(buf[..bytes].to_vec()).unwrap();
     }
+    drop(tx);
 }

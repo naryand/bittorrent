@@ -1,5 +1,3 @@
-main
-
 Cargo.lock
 target/
 *.torrent
@@ -9,3 +7,5 @@ target/
 *.mkv
 *.txt
 *.iso
+*.data*
+*.svg

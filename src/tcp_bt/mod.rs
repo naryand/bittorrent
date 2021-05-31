@@ -1,8 +1,10 @@
 // tcp_bt subfolder and tcp peer wire handshaking
 #![allow(dead_code)]
 
+pub mod connect;
 pub mod fetch;
 pub mod msg;
+pub mod parse;
 pub mod seed;
 
 use crate::{
@@ -11,43 +13,22 @@ use crate::{
     file::resume_torrent,
     hash::{spawn_hash_write, Hasher},
     tcp_bt::{
-        fetch::torrent_fetcher,
+        connect::{spawn_connectors, Connector},
         msg::{bytes::*, structs::*, SUBPIECE_LEN},
-        seed::{spawn_listener, torrent_seeder, Peer},
+        seed::{spawn_listener, Peer},
     },
     torrent::Torrent,
     tracker::{announce, get_addr},
 };
 
 use std::{
-    collections::VecDeque,
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc, Condvar, Mutex,
+        atomic::{AtomicU32, Ordering},
+        Arc, Mutex,
     },
-    thread::JoinHandle,
-    time::Duration,
 };
-pub struct Connector {
-    // do something with the TcpStream
-    pub queue: Mutex<VecDeque<Peer>>,
-    pub loops: Condvar,
-    pub piece: Condvar,
-    pub brk: AtomicBool,
-}
-
-impl Connector {
-    pub fn new() -> Self {
-        Self {
-            queue: Mutex::new(VecDeque::new()),
-            loops: Condvar::new(),
-            piece: Condvar::new(),
-            brk: AtomicBool::new(false),
-        }
-    }
-}
 
 pub fn send_handshake(
     stream: &mut TcpStream,
@@ -83,7 +64,8 @@ pub fn add_torrent(torrent: &Arc<Torrent>, tree: &[Item]) {
 
     // local tracker testing
     // use std::net::ToSocketAddrs;
-    // let addr = crate::tracker::Addr::Http("127.0.0.1:8000".to_socket_addrs().unwrap().nth(0).unwrap());
+    // let addr =
+    //     crate::tracker::Addr::Http("127.0.0.1:8000".to_socket_addrs().unwrap().nth(0).unwrap());
 
     // piece field
     let field: Arc<Mutex<ByteField>> = Arc::new(Mutex::new(ByteField {
@@ -93,7 +75,7 @@ pub fn add_torrent(torrent: &Arc<Torrent>, tree: &[Item]) {
 
     // spawn hashing thread pool
     let hasher = Arc::new(Hasher::new());
-    let a = spawn_hash_write(&hasher, &field, &torrent, &connector, 24);
+    let hasher_handles = spawn_hash_write(&hasher, &field, &torrent, &connector, 24);
 
     // resume any partial pieces
     resume_torrent(&torrent, &hasher);
@@ -101,10 +83,10 @@ pub fn add_torrent(torrent: &Arc<Torrent>, tree: &[Item]) {
     // start connection thread pool
     let listener = Arc::new(TcpListener::bind(("0.0.0.0", 0)).unwrap());
     let port = listener.local_addr().unwrap().port();
-    let b = spawn_listener(&connector, &listener);
+    let listener_handle = spawn_listener(&connector, &listener);
 
     let scount = Arc::new(AtomicU32::new(0));
-    let c = spawn_connectors(&connector, &hasher, &torrent, &field, &scount, 50);
+    let connector_handles = spawn_connectors(&connector, &hasher, &torrent, &field, &scount, 50);
 
     let tor = Arc::clone(&torrent);
     let num_subpieces = tor.piece_len / SUBPIECE_LEN as usize;
@@ -170,107 +152,12 @@ pub fn add_torrent(torrent: &Arc<Torrent>, tree: &[Item]) {
     connector.brk.store(true, Ordering::Relaxed);
     connector.loops.notify_all();
     // join threads
-    for t in c {
+    for t in connector_handles {
         t.join().unwrap();
     }
-    for t in a {
+    for t in hasher_handles {
         t.join().unwrap();
     }
 
-    b.join().unwrap();
-}
-
-fn spawn_connectors(
-    connector: &Arc<Connector>,
-    hasher: &Arc<Hasher>,
-    torrent: &Arc<Torrent>,
-    field: &Arc<Mutex<ByteField>>,
-    count: &Arc<AtomicU32>,
-    threads: usize,
-) -> Vec<JoinHandle<()>> {
-    let mut handles = vec![];
-    for i in 0..threads {
-        let connector = Arc::clone(connector);
-        let hasher = Arc::clone(hasher);
-        let torrent = Arc::clone(torrent);
-        let field = Arc::clone(field);
-        let count = Arc::clone(count);
-        let builder = std::thread::Builder::new().name(format!("{:?}", i));
-        handles.push(
-            builder
-                .spawn(move || {
-                    loop {
-                        let peer;
-                        {
-                            let mut guard = connector
-                                .loops
-                                .wait_while(connector.queue.lock().unwrap(), |q| {
-                                    if connector.brk.load(Ordering::Relaxed) {
-                                        return false;
-                                    }
-
-                                    q.is_empty()
-                                })
-                                .unwrap();
-                            if connector.brk.load(Ordering::Relaxed) {
-                                break;
-                            }
-
-                            peer = match guard.pop_front() {
-                                Some(s) => s,
-                                None => break,
-                            }
-                        }
-
-                        let mut stream = match peer {
-                            Peer::Addr(addr) => {
-                                let timeout = Duration::from_secs(5);
-                                match TcpStream::connect_timeout(&addr, timeout) {
-                                    Ok(s) => s,
-                                    Err(_) => continue,
-                                }
-                            }
-                            Peer::Stream(s) => s,
-                        };
-
-                        match send_handshake(&mut stream, torrent.info_hash, torrent.info_hash) {
-                            Some(_) => {}
-                            None => continue,
-                        }
-                        stream.set_nonblocking(false).unwrap();
-
-                        let v = torrent_fetcher(
-                            &mut stream,
-                            &hasher,
-                            &torrent,
-                            &field,
-                            &connector,
-                            &count,
-                        );
-                        // resets in progress pieces
-                        let mut complete = true;
-                        {
-                            let mut f = field.lock().unwrap();
-                            for i in &v {
-                                if f.arr[*i] == IN_PROGRESS {
-                                    f.arr[*i] = EMPTY;
-                                    connector.piece.notify_one();
-                                }
-                            }
-                            for i in &f.arr {
-                                if *i == EMPTY {
-                                    complete = false;
-                                }
-                            }
-                        }
-                        if complete {
-                            torrent_seeder(&mut stream, &torrent, &field, &connector, &count);
-                        }
-                    }
-                })
-                .unwrap(),
-        );
-    }
-
-    handles
+    listener_handle.join().unwrap();
 }

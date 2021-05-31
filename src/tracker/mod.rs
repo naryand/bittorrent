@@ -106,7 +106,7 @@ fn make_addr(announce: &Item) -> Result<Addr, String> {
     // remove any /announce
     match url.iter().find(|i| **i == b'/') {
         None => {}
-        _ => loop {
+        Some(_) => loop {
             url.pop();
             if *url.last().unwrap() == b'/' {
                 url.pop();

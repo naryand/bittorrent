@@ -26,8 +26,8 @@ fn parse_u32(msg: &[u8]) -> u32 {
 pub mod structs {
     use super::{bytes::*, parse_u32};
 
-    use serde::{Deserialize, Serialize};
-    #[derive(Serialize, Deserialize, Debug)]
+    use serde::Serialize;
+    #[derive(Serialize, Debug)]
     pub struct Handshake {
         pub len: u8,
         pub protocol: [u8; 19],
@@ -85,7 +85,7 @@ pub mod structs {
         }
     }
 
-    #[derive(Serialize, Deserialize, Debug, Default, Clone)]
+    #[derive(Serialize, Debug, Default, Clone)]
     pub struct Header {
         pub len: u32,
         pub byte: u8,
@@ -120,7 +120,7 @@ pub mod structs {
         }
     }
 
-    #[derive(Serialize, Deserialize, Debug, Default)]
+    #[derive(Serialize, Debug, Default)]
     pub struct Have {
         pub head: Header,
         pub index: u32,
@@ -149,7 +149,7 @@ pub mod structs {
         }
     }
 
-    #[derive(Serialize, Deserialize, Debug, Default)]
+    #[derive(Serialize, Debug, Default)]
     pub struct Bitfield {
         pub head: Header,
         pub data: Vec<u8>,
@@ -172,9 +172,10 @@ pub mod structs {
                 return None;
             }
 
+            bitfield.data = vec![];
             bitfield
                 .data
-                .copy_from_slice(&msg[5..((bitfield.head.len + 4) as usize)]);
+                .extend_from_slice(&msg[5..((bitfield.head.len + 4) as usize)]);
 
             if bitfield.test() {
                 let mut copy = msg[((bitfield.head.len + 4) as usize)..].to_vec();
@@ -187,7 +188,7 @@ pub mod structs {
         }
     }
 
-    #[derive(Serialize, Deserialize, Debug, Default)]
+    #[derive(Serialize, Debug, Default)]
     pub struct Request {
         pub head: Header,
         pub index: u32,
@@ -222,7 +223,7 @@ pub mod structs {
             }
         }
     }
-    #[derive(Serialize, Deserialize, Debug, Default, Clone)]
+    #[derive(Debug, Default, Clone)]
     pub struct Piece {
         pub head: Header,
         pub index: u32,
@@ -282,11 +283,12 @@ pub mod structs {
             bytes.append(&mut u32::to_be_bytes(self.index).to_vec());
             bytes.append(&mut u32::to_be_bytes(self.offset).to_vec());
             bytes.extend_from_slice(&self.data);
-            return bytes;
+
+            bytes
         }
     }
 
-    #[derive(Serialize, Deserialize, Debug, Default)]
+    #[derive(Serialize, Debug, Default)]
     pub struct Cancel {
         pub head: Header,
         pub index: u32,
@@ -425,7 +427,7 @@ pub fn try_parse(original: &[u8]) -> bool {
         };
         match byte {
             CHOKE | UNCHOKE | INTEREST | UNINTEREST => {
-                if Header::parse(&mut msg).is_none() {
+                if Header::parse(&msg).is_none() {
                     return false;
                 }
             }

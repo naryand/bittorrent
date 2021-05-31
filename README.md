@@ -18,6 +18,7 @@ Client for the peer to peer BitTorrent protocol from scratch in Rust.
 - Pipelining piece requests for higher throughput
 
 ### To do
+- Asynchronous IO on a multithreaded runtime
 - DHT, PEX, NAT traversal for more peers
 - Rarest first/Choking/Super seeding algorithms
 - Graphical/Web interface

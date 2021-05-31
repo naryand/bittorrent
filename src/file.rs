@@ -18,7 +18,7 @@ use std::{
     ops::Deref,
     path::Path,
     str::from_utf8,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 #[cfg(target_family = "unix")]
@@ -28,7 +28,7 @@ use std::os::windows::prelude::*;
 
 // stores file object and length of each file
 pub struct FileSize {
-    file: Arc<Mutex<File>>,
+    file: Arc<File>,
     len: usize,
 }
 
@@ -49,7 +49,8 @@ pub fn write_subpiece(piece: &Piece, piece_len: usize, files: &Arc<Vec<FileSize>
             // write the rest onto the next file
             {
                 // critical section
-                let f = filesize.file.lock().unwrap();
+                // let f = filesize.file.lock().unwrap();
+                let f = &filesize.file;
                 #[cfg(target_family = "windows")]
                 f.seek_write(&piece.data[(end - start)..], 0_u64).unwrap();
                 #[cfg(target_family = "unix")]
@@ -64,7 +65,8 @@ pub fn write_subpiece(piece: &Piece, piece_len: usize, files: &Arc<Vec<FileSize>
 
         {
             // critical section
-            let f = filesize.file.lock().unwrap();
+            // let f = filesize.file.lock().unwrap();
+            let f = &filesize.file;
             #[cfg(target_family = "windows")]
             f.seek_write(&piece.data[0..(end - start)], start as u64)
                 .unwrap();
@@ -97,7 +99,8 @@ pub fn read_subpiece(index: usize, offset: usize, torrent: &Arc<Torrent>) -> Opt
             let mut buf: Vec<u8> = vec![0; next_file as usize];
             {
                 // critical section
-                let f = filesize.file.lock().unwrap();
+                // let f = filesize.file.lock().unwrap();
+                let f = &filesize.file;
                 #[cfg(target_family = "windows")]
                 {
                     f.seek_read(&mut buf, 0).ok()?;
@@ -118,7 +121,8 @@ pub fn read_subpiece(index: usize, offset: usize, torrent: &Arc<Torrent>) -> Opt
         piece_buf = vec![0; end - start];
         {
             // critical section
-            let f = filesize.file.lock().unwrap();
+            // let f = filesize.file.lock().unwrap();
+            let f = &filesize.file;
             #[cfg(target_family = "windows")]
             {
                 f.seek_read(&mut piece_buf, start as u64).ok()?;
@@ -191,14 +195,14 @@ pub fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, usize)
         let filename = info.get("name".as_bytes()).unwrap().get_str();
         // create file and return
         let path = Path::new(std::str::from_utf8(&filename).unwrap());
-        let dest = Arc::new(Mutex::new(
+        let dest = Arc::new(
             OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
                 .open(path)
                 .unwrap(),
-        ));
+        );
         let file_size = FileSize {
             file: dest,
             len: file_len,
@@ -231,14 +235,14 @@ pub fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, usize)
             create_dir_all(base.clone()).unwrap();
             let full_path = base + "/" + filename;
             let file_path = Path::new(&full_path);
-            let file = Arc::new(Mutex::new(
+            let file = Arc::new(
                 OpenOptions::new()
                     .read(true)
                     .write(true)
                     .create(true)
                     .open(file_path)
                     .unwrap(),
-            ));
+            );
             ret.push(FileSize { file, len });
         }
 
