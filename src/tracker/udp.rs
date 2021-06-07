@@ -3,11 +3,9 @@
 
 use super::IpPort;
 
-use std::{
-    io::Error,
-    net::{SocketAddr, UdpSocket},
-    vec,
-};
+use std::{io::Error, net::SocketAddr, vec};
+
+use tokio::net::UdpSocket;
 
 use rand::random;
 use serde::{Deserialize, Serialize};
@@ -71,16 +69,13 @@ impl AnnounceResp {
 }
 
 // announces to udp tracker, gets vector of ip and ports
-pub fn udp_announce(
+pub async fn udp_announce(
     addr: SocketAddr,
     info_hash: [u8; 20],
     port: u16,
 ) -> Result<Vec<IpPort>, Error> {
     // set up udp socket
-    let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-    // socket.set_read_timeout(
-    //     Some(std::time::Duration::new(5, 0))).expect("timeout set error");
-    socket.set_nonblocking(false).unwrap();
+    let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
 
     // init structs and serialize
     let conreq = ConnectReq {
@@ -97,8 +92,8 @@ pub fn udp_announce(
     let mut serresp: Vec<u8> = bincode::serialize(&conresp).unwrap();
 
     // send connection request and get response
-    socket.send_to(&serreq, addr)?;
-    socket.recv_from(&mut serresp)?;
+    socket.send_to(&serreq, addr).await?;
+    socket.recv_from(&mut serresp).await?;
 
     // deserialize struct and check tx id
     conresp = bincode::deserialize(&serresp).unwrap();
@@ -123,8 +118,8 @@ pub fn udp_announce(
     let mut resp_buf = vec![0_u8; 32767];
 
     // send announce request and get response
-    socket.send_to(&serreq, addr)?;
-    let bytes = socket.recv_from(&mut resp_buf)?.0;
+    socket.send_to(&serreq, addr).await?;
+    let bytes = socket.recv_from(&mut resp_buf).await?.0;
 
     resp_buf.truncate(bytes);
     resp_buf.drain(0..20);

@@ -1,43 +1,44 @@
 #![allow(dead_code)]
 
+use super::msg::structs::*;
+
+use crate::{
+    field::{constant::*, ByteField},
+    hash::Hasher,
+    tcp_bt::msg::{partial_parse, Message, SUBPIECE_LEN},
+};
+
 use std::{
-    collections::VecDeque,
-    net::TcpStream,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
-        mpsc::Receiver,
-        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
     },
     thread::JoinHandle,
     vec,
 };
 
-use crate::{
-    field::{constant::*, ByteField},
-    hash::Hasher,
-    tcp_bt::{
-        msg::{partial_parse, Message, SUBPIECE_LEN},
-        seed::fulfill_req,
-    },
-    torrent::Torrent,
-};
+use tokio::{runtime::Handle, task};
+
+use async_channel::{self, Receiver, Sender};
 
 pub struct ParseItem {
     pub rx: Receiver<Vec<u8>>,
-    pub stream: Arc<Mutex<TcpStream>>,
+    pub tx: Sender<Request>,
+    pub handle: task::JoinHandle<Option<()>>,
     pub field: Option<Arc<Mutex<ByteField>>>,
 }
 pub struct Parser {
-    pub queue: Mutex<VecDeque<ParseItem>>,
-    pub loops: Condvar,
+    pub tx: Sender<ParseItem>,
+    pub rx: Receiver<ParseItem>,
     pub brk: AtomicBool,
 }
 
 impl Parser {
     pub fn new() -> Self {
+        let (tx, rx) = async_channel::unbounded::<ParseItem>();
         Self {
-            queue: Mutex::new(VecDeque::new()),
-            loops: Condvar::new(),
+            tx,
+            rx,
             brk: AtomicBool::new(false),
         }
     }
@@ -46,48 +47,31 @@ impl Parser {
 pub fn spawn_parsers(
     parser: &Arc<Parser>,
     hasher: &Arc<Hasher>,
-    torrent: &Arc<Torrent>,
-    piece_field: &Arc<Mutex<ByteField>>,
-    count: &Arc<AtomicU32>,
+    handle: Handle,
     threads: usize,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = vec![];
     for i in 0..threads {
         let parser = Arc::clone(parser);
         let hasher = Arc::clone(hasher);
-        let torrent = Arc::clone(torrent);
-        let piece_field = Arc::clone(piece_field);
-        let count = Arc::clone(count);
+        let handle = handle.clone();
         let builder = std::thread::Builder::new().name(format!("Parser{}", i));
         handles.push(
             builder
-                .spawn(move || 'q: loop {
-                    let item;
-                    {
-                        let mut guard = parser
-                            .loops
-                            .wait_while(parser.queue.lock().unwrap(), |q| {
-                                if parser.brk.load(Ordering::Relaxed) {
-                                    return false;
-                                }
-
-                                q.is_empty()
-                            })
-                            .unwrap();
-                        if parser.brk.load(Ordering::Relaxed) {
-                            break;
-                        }
-
-                        item = match guard.pop_front() {
-                            Some(s) => s,
-                            None => break,
-                        };
+                .spawn(move || loop {
+                    if parser.brk.load(Ordering::Relaxed) {
+                        break;
                     }
+
+                    let item = match handle.block_on(parser.rx.recv()) {
+                        Ok(i) => i,
+                        Err(_) => break
+                    };
 
                     let mut extbuf = vec![];
                     let mut pieces = vec![];
-                    loop {
-                        match item.rx.recv() {
+                    'buf: loop {
+                        match handle.block_on(item.rx.recv()) {
                             Ok(b) => unsafe {
                                 let x = extbuf.len();
                                 let y = b.len();
@@ -111,22 +95,27 @@ pub fn spawn_parsers(
                                             let mut f = field.lock().unwrap();
                                             f.arr[(piece.offset / SUBPIECE_LEN) as usize] =
                                                 COMPLETE;
+                                            if f.is_full() {
+                                                pieces.push(piece);
+                                                break 'buf;
+                                            }
                                         }
                                         pieces.push(piece);
                                     }
                                 }
-                                Message::Request(req) => {
-                                    let mut s = item.stream.lock().unwrap();
-                                    match fulfill_req(&mut s, &torrent, &piece_field, &count, &req)
-                                    {
-                                        Some(_) => continue,
-                                        None => continue 'q,
-                                    }
-                                }
+                                Message::Request(req) => match handle.block_on(item.tx.send(req)) {
+                                    Ok(_) => {}
+                                    Err(_) => break,
+                                },
                                 _ => continue,
                             }
                         }
                     }
+
+                    item.handle.abort();
+                    let _ = handle.block_on(item.handle);
+                    item.rx.close();
+
                     if pieces.is_empty() {
                         continue;
                     }

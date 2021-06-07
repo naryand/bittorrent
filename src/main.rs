@@ -7,15 +7,10 @@ mod tcp_bt;
 mod torrent;
 mod tracker;
 
-use {
-    bencode::{decode::parse, Item},
-    tcp_bt::add_torrent,
-    torrent::Torrent,
-};
+use torrent::Torrent;
 
-use std::sync::Arc;
-
-fn main() {
+#[tokio::main]
+async fn main() {
     // get arguments
     let args = std::env::args().collect::<Vec<String>>();
     let arg = if let Some(s) = args.get(1) {
@@ -26,7 +21,7 @@ fn main() {
     };
 
     // read and parse torrent file
-    let mut bytes: Vec<u8> = match std::fs::read(arg) {
+    let bytes: Vec<u8> = match tokio::fs::read(arg).await {
         Ok(b) => b,
         Err(e) => {
             eprintln!("{} {:?}", e, arg);
@@ -35,7 +30,6 @@ fn main() {
     };
 
     // download torrent
-    let torrent = Arc::new(Torrent::new(&bytes));
-    let tree: Vec<Item> = parse(&mut bytes);
-    add_torrent(&torrent, &tree);
+    let torrent = Torrent::new(&bytes).await;
+    torrent.start().await;
 }

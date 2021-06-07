@@ -18,6 +18,7 @@ use std::{
 };
 
 use sha1::{Digest, Sha1};
+use tokio::runtime::Handle;
 
 // struct for holding relevant variables for hashing threads
 pub struct Hasher {
@@ -44,6 +45,7 @@ pub fn spawn_hash_write(
     field: &Arc<Mutex<ByteField>>,
     torrent: &Arc<Torrent>,
     connector: &Arc<Connector>,
+    handle: Handle,
     threads: usize,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = vec![];
@@ -54,12 +56,13 @@ pub fn spawn_hash_write(
         let torrent = Arc::clone(torrent);
         let connector = Arc::clone(connector);
         let files = Arc::clone(&torrent.files);
+        let handle = handle.clone();
 
         let builder = std::thread::Builder::new().name(format!("Hash{}", i));
         let handle = builder
             .spawn(move || {
                 loop {
-                    let piece;
+                    let mut piece;
                     {
                         // critical section
                         let mut guard = hasher
@@ -83,6 +86,7 @@ pub fn spawn_hash_write(
                     hasher.empty.notify_all();
                     let index = piece[0].index as usize;
                     let mut flat_piece = Vec::with_capacity(torrent.piece_len);
+                    piece.sort_by_key(|x| x.offset);
                     for s in &piece {
                         flat_piece.extend_from_slice(&s.data); // assumes ordered by offset
                     }
@@ -108,9 +112,8 @@ pub fn spawn_hash_write(
                         }
                         continue;
                     }
-
                     for s in &piece {
-                        write_subpiece(s, torrent.piece_len, &files);
+                        handle.block_on(write_subpiece(s, torrent.piece_len, &files));
                     }
                     {
                         // critical section

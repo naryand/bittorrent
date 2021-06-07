@@ -6,13 +6,18 @@ use super::IpPort;
 use crate::bencode::{decode::parse, Item};
 
 use std::{
-    io::{Error, ErrorKind, Read, Write},
-    net::{SocketAddr, TcpStream},
+    io::{Error, ErrorKind},
+    net::SocketAddr,
     str::from_utf8,
 };
 
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
+
 // takes in info_hash and tracker addr, announces and gets peer IpPorts
-pub fn http_announce(
+pub async fn http_announce(
     addr: SocketAddr,
     info_hash: [u8; 20],
     port: u16,
@@ -33,13 +38,13 @@ pub fn http_announce(
     // convert base to Vec<u8> and append to get vector
     get.extend_from_slice(&base.as_bytes());
     // connect to the tracker
-    let mut stream = TcpStream::connect(addr)?;
+    let mut stream = TcpStream::connect(addr).await?;
     // send the get request to the tracker
-    stream.write_all(&get)?;
+    stream.write_all(&get).await?;
     // read it's reply
     let mut buf: Vec<u8> = vec![0; 10000];
     let len;
-    match stream.read(&mut buf) {
+    match stream.read(&mut buf).await {
         Ok(l) => len = l,
         Err(e) => return Err(Error::new(ErrorKind::Other, e.to_string())),
     }

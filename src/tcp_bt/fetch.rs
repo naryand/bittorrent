@@ -8,18 +8,30 @@ use super::{
 };
 use crate::{
     field::{constant::*, ByteField},
-    tcp_bt::parse::ParseItem,
+    tcp_bt::{parse::ParseItem, seed::fulfill_req},
     torrent::Torrent,
 };
 
 use std::{
-    io::{ErrorKind, Read, Write},
-    net::TcpStream,
-    sync::{atomic::Ordering, mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc, Mutex,
+    },
     usize, vec,
 };
 
-fn request_piece(stream: &mut TcpStream, torrent: &Arc<Torrent>, index: u32) -> Option<usize> {
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
+    sync::Mutex as TokioMutex,
+    task::{self, JoinHandle},
+};
+
+async fn request_piece(
+    write: &Arc<TokioMutex<OwnedWriteHalf>>,
+    torrent: &Arc<Torrent>,
+    index: u32,
+) -> Option<usize> {
     let mut request = Request {
         head: Header {
             len: 13_u32.to_be(),
@@ -41,7 +53,13 @@ fn request_piece(stream: &mut TcpStream, torrent: &Arc<Torrent>, index: u32) -> 
     for i in 0..num_subpieces {
         request.offset = u32::to_be((i as u32) * SUBPIECE_LEN);
         let req_u8 = bincode::serialize(&request).unwrap();
-        stream.write_all(&req_u8).ok()?;
+
+        let w;
+        {
+            let mut strm = write.lock().await;
+            w = strm.write_all(&req_u8).await;
+        }
+        w.ok()?;
     }
 
     if remainder % SUBPIECE_LEN as usize > 0 {
@@ -49,16 +67,26 @@ fn request_piece(stream: &mut TcpStream, torrent: &Arc<Torrent>, index: u32) -> 
         request.plen = u32::to_be(last_plen as u32);
         request.offset = u32::to_be(num_subpieces as u32 * SUBPIECE_LEN);
         let req_u8 = bincode::serialize(&request).unwrap();
-        stream.write_all(&req_u8).ok()?;
+        let w;
+        {
+            let mut strm = write.lock().await;
+            w = strm.write_all(&req_u8).await;
+        }
+        w.ok()?;
         num_subpieces += 1;
     }
+
     Some(num_subpieces)
 }
 
-fn read_piece(
-    stream: &mut TcpStream,
+async fn read_piece(
+    read: &Arc<TokioMutex<OwnedReadHalf>>,
+    write: &Arc<TokioMutex<OwnedWriteHalf>>,
     parser: &Arc<Parser>,
+    torrent: &Arc<Torrent>,
+    field: &Arc<Mutex<ByteField>>,
     connector: &Arc<Connector>,
+    count: &Arc<AtomicU32>,
     num_subpieces: usize,
 ) -> Option<()> {
     let subfield = ByteField {
@@ -66,70 +94,96 @@ fn read_piece(
     };
 
     let am_subfield = Arc::new(Mutex::new(subfield));
-    let (tx, rx) = mpsc::channel();
-    let item = ParseItem {
-        rx,
-        stream: Arc::new(Mutex::new(stream.try_clone().unwrap())),
-        field: Some(Arc::clone(&am_subfield)),
-    };
-    {
-        let mut q = parser.queue.lock().unwrap();
-        q.push_back(item);
-        parser.loops.notify_one();
-    }
-    let mut buf = vec![0; 65536];
-    loop {
-        let bytes;
+    let (byte_tx, byte_rx) = async_channel::unbounded();
+    let (req_tx, req_rx) = async_channel::unbounded();
+
+    let read = Arc::clone(read);
+    let write = Arc::clone(write);
+
+    let torrent = Arc::clone(torrent);
+    let field = Arc::clone(field);
+    let connector = Arc::clone(connector);
+    let count = Arc::clone(count);
+    let subf = Arc::clone(&am_subfield);
+
+    let seeder: JoinHandle<Option<()>> = task::spawn(async move {
         loop {
-            match stream.read(&mut buf) {
-                Ok(b) => {
-                    bytes = b;
-                    break;
-                }
-                Err(e) => {
-                    if e.kind() == ErrorKind::WouldBlock {
-                        if connector.brk.load(Ordering::Relaxed) {
-                            return None;
-                        }
-                        {
-                            let subf = am_subfield.lock().unwrap();
-                            if subf.is_full() {
-                                drop(tx);
-                                return Some(());
-                            }
-                        }
-                        std::thread::sleep(std::time::Duration::from_micros(500));
-                    } else {
-                        return None;
-                    }
-                }
+            let req = match req_rx.recv().await {
+                Ok(r) => r,
+                Err(_) => return Some(()),
+            };
+            match fulfill_req(&write, &torrent, &field, &count, &req).await {
+                Some(_) => continue,
+                None => return None,
             }
         }
-        if bytes == 0 {
-            return None;
-        }
+    });
 
-        tx.send(buf[..bytes].to_vec()).unwrap();
-    }
+    let reader = task::spawn(async move {
+        let mut buf = vec![0; 65536];
+        loop {
+            if connector.brk.load(Ordering::Relaxed) {
+                return None;
+            }
+            if task::block_in_place(|| {
+                let subf = subf.lock().unwrap();
+                if subf.is_full() {
+                    return None;
+                }
+                return Some(());
+            })
+            .is_none()
+            {
+                break;
+            }
+            
+            let r;
+            {
+                let mut strm = read.lock().await;
+                r = strm.read(&mut buf).await;
+            }
+            let bytes = r.ok()?;
+
+            if byte_tx.send(buf[..bytes].to_vec()).await.is_err() {
+                break;
+            }
+        }
+        drop(byte_tx);
+        return Some(());
+    });
+
+    let item = ParseItem {
+        rx: byte_rx,
+        tx: req_tx,
+        handle: reader,
+        field: Some(Arc::clone(&am_subfield)),
+    };
+
+    parser.tx.send(item).await.unwrap();
+    
+    seeder.await.unwrap()?;
+
+    return Some(());
 }
 
 // represents a single connection to a peer, continously fetches subpieces
-pub fn torrent_fetcher(
-    stream: &mut TcpStream,
+pub async fn torrent_fetcher(
+    read: &Arc<TokioMutex<OwnedReadHalf>>,
+    write: &Arc<TokioMutex<OwnedWriteHalf>>,
     parser: &Arc<Parser>,
     torrent: &Arc<Torrent>,
     field: &Arc<Mutex<ByteField>>,
     connector: &Arc<Connector>,
+    count: &Arc<AtomicU32>,
 ) -> Vec<usize> {
     let mut idxs = vec![];
     // get pieces
     loop {
         let mut nums = vec![];
         // peers reject if you request more than 1 piece
-        for _ in 0..1 {
+        for _ in 0..1_usize {
             // pick a piece
-            let piece_idx;
-            {
+            let piece_idx = match task::block_in_place(move || {
                 // critical section
                 let mut pf = connector
                     .piece
@@ -144,16 +198,19 @@ pub fn torrent_fetcher(
                     })
                     .unwrap();
                 if let Some(p) = pf.get_empty() {
-                    piece_idx = p
+                    pf.arr[p] = IN_PROGRESS;
+                    return Some(p);
                 } else {
-                    return idxs;
+                    return None;
                 }
-                pf.arr[piece_idx] = IN_PROGRESS;
-            }
+            }) {
+                Some(p) => p,
+                None => return idxs,
+            };
             idxs.push(piece_idx);
 
             // fetch piece
-            let num = request_piece(stream, torrent, piece_idx as u32);
+            let num = request_piece(write, torrent, piece_idx as u32).await;
 
             if let Some(n) = num {
                 nums.push(n)
@@ -162,7 +219,19 @@ pub fn torrent_fetcher(
             }
         }
         for num_subpieces in nums {
-            if read_piece(stream, parser, connector, num_subpieces).is_none() {
+            if read_piece(
+                &read,
+                &write,
+                parser,
+                torrent,
+                field,
+                connector,
+                count,
+                num_subpieces,
+            )
+            .await
+            .is_none()
+            {
                 return idxs;
             }
         }
