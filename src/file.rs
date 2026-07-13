@@ -12,7 +12,14 @@ use crate::{
     torrent::Torrent,
 };
 
-use std::{collections::BTreeMap, io::SeekFrom, ops::Deref, path::Path, str::from_utf8, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    io::SeekFrom,
+    ops::Deref,
+    path::{Component, Path, PathBuf},
+    str::from_utf8,
+    sync::Arc,
+};
 
 use tokio::{
     fs::{create_dir_all, File, OpenOptions},
@@ -154,6 +161,36 @@ pub async fn resume_torrent(torrent: &Arc<Torrent>, hasher: &Arc<Hasher>) {
     });
 }
 
+fn safe_path_component(bytes: &[u8]) -> &str {
+    let component = from_utf8(bytes).unwrap();
+
+    if component.is_empty() || component.contains('/') || component.contains('\\') {
+        panic!("unsafe torrent path component");
+    }
+
+    let mut components = Path::new(component).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => component,
+        _ => panic!("unsafe torrent path component"),
+    }
+}
+
+fn assert_no_symlink(path: &Path) {
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            panic!("refusing to write through symlink in torrent path");
+        }
+    }
+}
+
+fn assert_no_symlinks_in_path(path: &Path) {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        assert_no_symlink(&current);
+    }
+}
+
 // parses out each file from the info dict
 pub async fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, usize) {
     // single file
@@ -163,7 +200,8 @@ pub async fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, 
         // name of the file
         let filename = info.get("name".as_bytes()).unwrap().get_str();
         // create file and return
-        let path = Path::new(std::str::from_utf8(&filename).unwrap());
+        let path = PathBuf::from(safe_path_component(&filename));
+        assert_no_symlinks_in_path(&path);
         let dest = Arc::new(TokioMutex::new(
             OpenOptions::new()
                 .read(true)
@@ -183,6 +221,7 @@ pub async fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, 
         // multifile
         // get parent folder name and file dicts
         let name = info.get("name".as_bytes()).unwrap().get_str();
+        let base_name = safe_path_component(&name);
         let files = info.get("files".as_bytes()).unwrap().get_list();
         let mut ret: Vec<FileSize> = vec![];
         // for each dict
@@ -194,17 +233,19 @@ pub async fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, 
             let mut path_list = dict.get("path".as_bytes()).unwrap().get_list();
             // end filename
             let end_file = path_list.pop().unwrap().get_str();
-            let filename = from_utf8(&end_file).unwrap();
+            let filename = safe_path_component(&end_file);
             // parent folders to the filename
-            let mut base = "./".to_string() + from_utf8(&name).unwrap();
+            let mut base = PathBuf::from(base_name);
             for folder in path_list {
-                let folder_name = "/".to_string() + from_utf8(&folder.get_str()).unwrap();
-                base.push_str(&folder_name);
+                let folder_bytes = folder.get_str();
+                base.push(safe_path_component(&folder_bytes));
             }
             // create parents and file
-            create_dir_all(base.clone()).await.unwrap();
-            let full_path = base + "/" + filename;
-            let file_path = Path::new(&full_path);
+            assert_no_symlinks_in_path(&base);
+            create_dir_all(&base).await.unwrap();
+            assert_no_symlinks_in_path(&base);
+            let file_path = base.join(filename);
+            assert_no_symlinks_in_path(&file_path);
             let file = Arc::new(TokioMutex::new(
                 OpenOptions::new()
                     .read(true)
@@ -224,5 +265,33 @@ pub async fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, 
         }
 
         (Arc::new(ret), total_len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_path_component;
+
+    #[test]
+    fn safe_path_component_accepts_plain_name() {
+        assert_eq!(safe_path_component(b"file.txt"), "file.txt");
+    }
+
+    #[test]
+    #[should_panic(expected = "unsafe torrent path component")]
+    fn safe_path_component_rejects_parent_directory() {
+        safe_path_component(b"..");
+    }
+
+    #[test]
+    #[should_panic(expected = "unsafe torrent path component")]
+    fn safe_path_component_rejects_embedded_separator() {
+        safe_path_component(b"nested/file.txt");
+    }
+
+    #[test]
+    #[should_panic(expected = "unsafe torrent path component")]
+    fn safe_path_component_rejects_windows_separator() {
+        safe_path_component(b"nested\\file.txt");
     }
 }
