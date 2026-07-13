@@ -136,7 +136,7 @@ async fn read_piece(
             {
                 break;
             }
-            
+
             let r;
             {
                 let mut strm = read.lock().await;
@@ -160,7 +160,7 @@ async fn read_piece(
     };
 
     parser.tx.send(item).await.unwrap();
-    
+
     seeder.await.unwrap()?;
 
     return Some(());

@@ -65,7 +65,7 @@ pub fn spawn_parsers(
 
                     let item = match handle.block_on(parser.rx.recv()) {
                         Ok(i) => i,
-                        Err(_) => break
+                        Err(_) => break,
                     };
 
                     let mut extbuf = vec![];
