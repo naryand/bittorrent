@@ -12,7 +12,14 @@ use crate::{
     torrent::Torrent,
 };
 
-use std::{collections::BTreeMap, io::SeekFrom, ops::Deref, path::Path, str::from_utf8, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    io::SeekFrom,
+    ops::Deref,
+    path::{Component, Path, PathBuf},
+    str::from_utf8,
+    sync::Arc,
+};
 
 use tokio::{
     fs::{create_dir_all, File, OpenOptions},
@@ -25,6 +32,45 @@ use tokio::{
 pub struct FileSize {
     file: Arc<TokioMutex<File>>,
     len: usize,
+}
+
+fn safe_path_component(bytes: &[u8]) -> &str {
+    let name = from_utf8(bytes).expect("torrent path is not valid utf-8");
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(component)), None) if !component.is_empty() => name,
+        _ => panic!("torrent path contains unsafe components"),
+    }
+}
+
+async fn reject_symlink(path: &Path) {
+    if tokio::fs::symlink_metadata(path)
+        .await
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        panic!("refusing to open symlink path");
+    }
+}
+
+async fn open_safe_file(path: &Path) -> File {
+    reject_symlink(path).await;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)
+        .await
+        .unwrap()
+}
+
+async fn create_safe_dir_all(path: &Path) {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        reject_symlink(&current).await;
+    }
+    create_dir_all(path).await.unwrap();
 }
 
 // writes and maps a subpiece to it's file(s)
@@ -163,16 +209,8 @@ pub async fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, 
         // name of the file
         let filename = info.get("name".as_bytes()).unwrap().get_str();
         // create file and return
-        let path = Path::new(std::str::from_utf8(&filename).unwrap());
-        let dest = Arc::new(TokioMutex::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(path)
-                .await
-                .unwrap(),
-        ));
+        let path = Path::new(safe_path_component(&filename));
+        let dest = Arc::new(TokioMutex::new(open_safe_file(path).await));
         let file_size = FileSize {
             file: dest,
             len: file_len,
@@ -183,6 +221,7 @@ pub async fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, 
         // multifile
         // get parent folder name and file dicts
         let name = info.get("name".as_bytes()).unwrap().get_str();
+        let root = safe_path_component(&name);
         let files = info.get("files".as_bytes()).unwrap().get_list();
         let mut ret: Vec<FileSize> = vec![];
         // for each dict
@@ -194,26 +233,17 @@ pub async fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, 
             let mut path_list = dict.get("path".as_bytes()).unwrap().get_list();
             // end filename
             let end_file = path_list.pop().unwrap().get_str();
-            let filename = from_utf8(&end_file).unwrap();
+            let filename = safe_path_component(&end_file);
             // parent folders to the filename
-            let mut base = "./".to_string() + from_utf8(&name).unwrap();
+            let mut base = PathBuf::from(root);
             for folder in path_list {
-                let folder_name = "/".to_string() + from_utf8(&folder.get_str()).unwrap();
-                base.push_str(&folder_name);
+                let folder_bytes = folder.get_str();
+                base.push(safe_path_component(&folder_bytes));
             }
             // create parents and file
-            create_dir_all(base.clone()).await.unwrap();
-            let full_path = base + "/" + filename;
-            let file_path = Path::new(&full_path);
-            let file = Arc::new(TokioMutex::new(
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open(file_path)
-                    .await
-                    .unwrap(),
-            ));
+            create_safe_dir_all(&base).await;
+            let file_path = base.join(filename);
+            let file = Arc::new(TokioMutex::new(open_safe_file(&file_path).await));
             ret.push(FileSize { file, len });
         }
 
@@ -224,5 +254,30 @@ pub async fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, 
         }
 
         (Arc::new(ret), total_len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_path_component;
+
+    #[test]
+    fn safe_path_component_accepts_single_filename() {
+        assert_eq!(safe_path_component(b"movie.mkv"), "movie.mkv");
+    }
+
+    #[test]
+    fn safe_path_component_rejects_absolute_paths() {
+        assert!(std::panic::catch_unwind(|| safe_path_component(b"/tmp/movie.mkv")).is_err());
+    }
+
+    #[test]
+    fn safe_path_component_rejects_parent_paths() {
+        assert!(std::panic::catch_unwind(|| safe_path_component(b"../movie.mkv")).is_err());
+    }
+
+    #[test]
+    fn safe_path_component_rejects_nested_paths() {
+        assert!(std::panic::catch_unwind(|| safe_path_component(b"folder/movie.mkv")).is_err());
     }
 }
