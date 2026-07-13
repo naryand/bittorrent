@@ -22,7 +22,7 @@ use std::{
 };
 
 use tokio::{
-    fs::{create_dir_all, File, OpenOptions},
+    fs::{create_dir_all, symlink_metadata, File, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex as TokioMutex,
     task,
@@ -175,20 +175,39 @@ fn safe_path_component(bytes: &[u8]) -> &str {
     }
 }
 
-fn assert_no_symlink(path: &Path) {
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() {
-            panic!("refusing to write through symlink in torrent path");
-        }
+async fn reject_symlink(path: &Path) {
+    if symlink_metadata(path)
+        .await
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        panic!("refusing to write through symlink in torrent path");
     }
 }
 
-fn assert_no_symlinks_in_path(path: &Path) {
+async fn reject_symlinks_in_path(path: &Path) {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
-        assert_no_symlink(&current);
+        reject_symlink(&current).await;
     }
+}
+
+async fn open_safe_file(path: &Path) -> File {
+    reject_symlinks_in_path(path).await;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)
+        .await
+        .unwrap()
+}
+
+async fn create_safe_dir_all(path: &Path) {
+    reject_symlinks_in_path(path).await;
+    create_dir_all(path).await.unwrap();
+    reject_symlinks_in_path(path).await;
 }
 
 // parses out each file from the info dict
@@ -201,16 +220,7 @@ pub async fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, 
         let filename = info.get("name".as_bytes()).unwrap().get_str();
         // create file and return
         let path = PathBuf::from(safe_path_component(&filename));
-        assert_no_symlinks_in_path(&path);
-        let dest = Arc::new(TokioMutex::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(path)
-                .await
-                .unwrap(),
-        ));
+        let dest = Arc::new(TokioMutex::new(open_safe_file(&path).await));
         let file_size = FileSize {
             file: dest,
             len: file_len,
@@ -241,20 +251,9 @@ pub async fn parse_file(info: &BTreeMap<Vec<u8>, Item>) -> (Arc<Vec<FileSize>>, 
                 base.push(safe_path_component(&folder_bytes));
             }
             // create parents and file
-            assert_no_symlinks_in_path(&base);
-            create_dir_all(&base).await.unwrap();
-            assert_no_symlinks_in_path(&base);
+            create_safe_dir_all(&base).await;
             let file_path = base.join(filename);
-            assert_no_symlinks_in_path(&file_path);
-            let file = Arc::new(TokioMutex::new(
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open(file_path)
-                    .await
-                    .unwrap(),
-            ));
+            let file = Arc::new(TokioMutex::new(open_safe_file(&file_path).await));
             ret.push(FileSize { file, len });
         }
 
@@ -275,6 +274,12 @@ mod tests {
     #[test]
     fn safe_path_component_accepts_plain_name() {
         assert_eq!(safe_path_component(b"file.txt"), "file.txt");
+    }
+
+    #[test]
+    #[should_panic(expected = "unsafe torrent path component")]
+    fn safe_path_component_rejects_absolute_path() {
+        safe_path_component(b"/tmp/file.txt");
     }
 
     #[test]

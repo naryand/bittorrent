@@ -76,7 +76,7 @@ impl Torrent {
         // local tracker testing
         // use std::net::ToSocketAddrs;
         // let addr =
-            // crate::tracker::Addr::Http("127.0.0.1:8000".to_socket_addrs().unwrap().nth(0).unwrap());
+        // crate::tracker::Addr::Http("127.0.0.1:8000".to_socket_addrs().unwrap().nth(0).unwrap());
 
         // piece field
         let field: Arc<Mutex<ByteField>> = Arc::new(Mutex::new(ByteField {
