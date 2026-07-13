@@ -168,19 +168,15 @@ pub mod structs {
                 head: Header::parse(msg)?,
                 ..Bitfield::default()
             };
-            if msg.len() < (bitfield.head.len + 4) as usize {
+            let msg_len = bitfield.head.len.checked_add(4)? as usize;
+            if msg.len() < msg_len {
                 return None;
             }
 
-            bitfield.data = vec![];
-            bitfield
-                .data
-                .extend_from_slice(&msg[5..((bitfield.head.len + 4) as usize)]);
+            bitfield.data = msg[5..msg_len].to_vec();
 
             if bitfield.test() {
-                let mut copy = msg[((bitfield.head.len + 4) as usize)..].to_vec();
-                msg.clear();
-                msg.append(&mut copy);
+                msg.drain(0..msg_len);
                 Some(bitfield)
             } else {
                 None
@@ -244,33 +240,19 @@ pub mod structs {
                 head: Header::parse(&msg[0..5])?,
                 ..Piece::default()
             };
-            if msg.len() < (piece.head.len + 4) as usize {
+            if piece.head.len < 9 {
+                return None;
+            }
+            let msg_len = piece.head.len.checked_add(4)? as usize;
+            if msg.len() < msg_len {
                 return None;
             }
             piece.index = parse_u32(&msg[5..9]);
             piece.offset = parse_u32(&msg[9..13]);
-            unsafe {
-                piece.data = Vec::new();
-                piece.data.reserve((piece.head.len - 9) as usize);
-                piece.data.set_len((piece.head.len - 9) as usize);
-                let src = msg.as_ptr().add(13);
-                let dst = piece.data.as_mut_ptr();
-                std::ptr::copy_nonoverlapping(src, dst, (piece.head.len - 9) as usize);
-                piece.data.set_len((piece.head.len - 9) as usize);
-            }
+            piece.data = msg[13..msg_len].to_vec();
 
             if piece.test() {
-                let x = msg.len() - (piece.head.len + 4) as usize;
-                unsafe {
-                    std::ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut(
-                        msg.as_mut_ptr(),
-                        (piece.head.len + 4) as usize,
-                    ));
-                    let src = msg.as_ptr().add((piece.head.len + 4) as usize);
-                    let dst = msg.as_mut_ptr();
-                    std::ptr::copy(src, dst, x);
-                    msg.set_len(x);
-                }
+                msg.drain(0..msg_len);
                 Some(piece)
             } else {
                 None
@@ -538,5 +520,43 @@ pub fn partial_parse(msg: &mut Vec<u8>) -> (bool, Vec<Message>) {
             },
             _ => return (false, list),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{partial_parse, Message};
+
+    #[test]
+    fn parses_non_empty_bitfield_without_panicking() {
+        let mut msg = vec![0, 0, 0, 2, 5, 0xff];
+        let (incomplete, parsed) = partial_parse(&mut msg);
+
+        assert!(incomplete);
+        assert!(msg.is_empty());
+        match parsed.as_slice() {
+            [Message::Bitfield(bitfield)] => assert_eq!(bitfield.data, vec![0xff]),
+            _ => panic!("expected one bitfield message"),
+        }
+    }
+
+    #[test]
+    fn rejects_piece_lengths_smaller_than_piece_header() {
+        let mut msg = vec![0, 0, 0, 5, 7, 0, 0, 0, 0, 0, 0, 0, 0];
+        let (incomplete, parsed) = partial_parse(&mut msg);
+
+        assert!(!incomplete);
+        assert!(parsed.is_empty());
+        assert_eq!(msg, vec![0, 0, 0, 5, 7, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rejects_wrapping_piece_lengths_without_allocating() {
+        let mut msg = vec![0xff, 0xff, 0xff, 0xff, 7, 0, 0, 0, 0, 0, 0, 0, 0];
+        let (incomplete, parsed) = partial_parse(&mut msg);
+
+        assert!(!incomplete);
+        assert!(parsed.is_empty());
+        assert_eq!(msg, vec![0xff, 0xff, 0xff, 0xff, 7, 0, 0, 0, 0, 0, 0, 0, 0]);
     }
 }
